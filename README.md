@@ -2,15 +2,27 @@
 
 # plavno
 
-A lightweight music TUI for Linux with service waves, library shuffle, and mouse controls.
+A lightweight TUI player for Linux with music streams from popular services, library shuffle, and mouse controls.
 
 <img src="intro.png" alt="plavno terminal player with album artwork and an audio-reactive wave" width="791">
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
-[Quick start](#quick-start) · [Services](#services) · [Controls](#controls)
+[Features](#features) · [Quick start](#quick-start) · [Services](#services) · [Controls](#controls)
 
 </div>
+
+## Features
+
+- **MPRIS desktop integration** — control playback with media keys, desktop media
+  widgets, or `playerctl`. Track information and album artwork appear in desktop controls.
+- **Service waves and shuffle** — Yandex My Vibe, VK recommendations, library shuffle,
+  and Wave Shuffle across connected services.
+- **Likes and dislikes** — like/unlike in Yandex or VK, exclude unwanted tracks, and undo dislikes.
+- **Mouse and hotkeys** — click controls, drag to seek, scroll for volume, and select track text to copy.
+- **Listening history** — search past plays by title or artist and replay tracks.
+- **RAM buffering and prefetch** — start playback while downloading; cache adjacent tracks for seeking and replay.
+- **Audio-reactive visuals** — an animated wave with album artwork, toggled with `v`.
 
 ## Quick start
 
