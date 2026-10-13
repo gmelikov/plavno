@@ -1,0 +1,136 @@
+mod artwork;
+mod audio;
+mod backend;
+mod browser_login;
+mod config;
+mod controls;
+mod dislikes;
+mod engine;
+mod flow_view;
+mod history;
+mod history_view;
+mod mpris;
+mod source_view;
+mod stream;
+mod text_selection;
+mod tui;
+mod wave;
+
+use anyhow::{Result, bail};
+use std::{
+    io::{self, IsTerminal},
+    path::PathBuf,
+};
+
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("plavno: {error:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.len() == 1 && args[0] == "--stream-audio" {
+        return stream::run();
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        println!(
+            "plavno — a lightweight music TUI\n\n  plavno                        play the first connected service\n  plavno --source SOURCE        yandex / soundcloud / spotify / vk / ytmusic / mixed\n  plavno --favorites            shuffle favorites (default: Yandex; --source vk: My Music)\n  plavno --no-wave              start with the animated waveform hidden\n  plavno login [SOURCE]         connect a service (default: yandex; SoundCloud/VK: browser)\n  plavno login yandex           paste a Yandex Music OAuth token\n  plavno login SOURCE --manual  paste a JSON profile without browser automation\n  plavno diagnose vk           inspect the VK response layout (no session values)\n  plavno sources                list service configuration\n  plavno --file FILE            play a local file\n\nSpace pause · x stop · p/n tracks · ←/→ ±5s · Shift+←/→ ±30s\nClick controls · drag progress · scroll bar to seek, elsewhere volume · h or / history\nHistory: type to search · ↑/↓ select · Enter play · Esc back\ns sources · m Wave Shuffle · w restart wave · f Favorites Shuffle\ng Flow settings · v toggle visualization · l ♥/♡ favorites · d dislike · u undo dislike\n+/- volume · q quit"
+        );
+        return Ok(());
+    }
+    if args.len() == 1 && args[0] == "login" {
+        return config::login();
+    }
+    if let [command, source] = args.as_slice()
+        && command == "login"
+    {
+        let source = source.to_str().unwrap_or_default();
+        return if source == "yandex" {
+            config::login()
+        } else {
+            config::login_provider(source)
+        };
+    }
+    if let [command, source, flag] = args.as_slice()
+        && command == "login"
+        && flag == "--manual"
+    {
+        return config::login_manual(source.to_str().unwrap_or_default());
+    }
+    if let [command, source] = args.as_slice()
+        && command == "diagnose"
+        && source == "vk"
+    {
+        let report = backend::Vk::new(config::profile_path("vk")?).diagnose()?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if args.len() == 1 && args[0] == "sources" {
+        let (backends, services) = config::backends()?;
+        let sources = backend::Multi::new(backends, services, None)?;
+        for source in backend::Backend::services(&sources) {
+            println!("{:<12} {:<16} {}", source.key, source.name, source.status);
+        }
+        return Ok(());
+    }
+    let mut favorites = false;
+    let mut no_wave = false;
+    let mut selected = None;
+    let mut file = None;
+    let mut arguments = args.iter();
+    while let Some(arg) = arguments.next() {
+        if arg == "--favorites" {
+            favorites = true;
+        } else if arg == "--no-wave" {
+            no_wave = true;
+        } else if arg == "--source" {
+            selected = Some(
+                arguments
+                    .next()
+                    .and_then(|a| a.to_str())
+                    .ok_or_else(|| anyhow::anyhow!("--source requires a source name"))?,
+            );
+        } else if arg == "--file" {
+            file =
+                Some(PathBuf::from(arguments.next().ok_or_else(|| {
+                    anyhow::anyhow!("--file requires a file path")
+                })?));
+        } else {
+            bail!("Unknown arguments; run plavno --help");
+        }
+    }
+    let backend: Box<dyn backend::Backend> = if let Some(file) = file {
+        anyhow::ensure!(
+            selected.is_none() && !favorites,
+            "--file cannot be combined with --source or --favorites"
+        );
+        Box::new(backend::Local(file))
+    } else {
+        if favorites && selected.is_none() {
+            selected = Some("yandex");
+        }
+        let (backends, services) = config::backends()?;
+        Box::new(backend::Multi::new(backends, services, selected)?)
+    };
+    anyhow::ensure!(
+        io::stdin().is_terminal() && io::stdout().is_terminal(),
+        "The TUI requires an interactive terminal"
+    );
+    let (mut engine, events, receiver) = engine::Engine::new(backend)?;
+    if favorites {
+        engine.mode = backend::PlaybackMode::FavoritesShuffle;
+    }
+    let mpris = match mpris::Mpris::new(&engine, events.clone()) {
+        Ok(mpris) => Some(mpris),
+        Err(error) => {
+            eprintln!("plavno: MPRIS unavailable: {error:#}");
+            None
+        }
+    };
+    tui::run(engine, events, receiver, mpris, !no_wave)
+}

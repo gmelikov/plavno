@@ -1,0 +1,22 @@
+[package]
+name = "plavno-spotify"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+librespot-core = { version = "=0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-metadata = { version = "=0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-protocol = "=0.8.0"
+protobuf = "3.7"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+
+[profile.dev]
+debug = 1
+
+[profile.release]
+lto = "thin"
+strip = true
