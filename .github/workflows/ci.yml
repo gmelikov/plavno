@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      ref:
+        description: Git ref to check
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -38,6 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Install system dependencies

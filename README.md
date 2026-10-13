@@ -26,11 +26,25 @@ A lightweight TUI player for Linux with music streams from popular services, lib
 
 ## Quick start
 
-Requires Rust, pkg-config, ALSA and D-Bus headers: `libasound2-dev libdbus-1-dev`
-(Debian/Ubuntu) or `alsa-lib-devel dbus-devel` (Fedora). Audio uses the ALSA default
-device; PipeWire/PulseAudio needs its ALSA plugin. Install ffmpeg for HLS playback.
+Install from crates.io (requires Rust, pkg-config, ALSA and D-Bus headers):
 
-Install the published release with `cargo install plavno --locked`, or build from source:
+```sh
+cargo install plavno --locked
+plavno sources
+```
+
+Build dependencies: `libasound2-dev libdbus-1-dev` on Debian/Ubuntu, or
+`alsa-lib-devel dbus-devel` on Fedora.
+
+Alternatively, download a binary from [GitHub Releases](https://github.com/gmelikov/plavno/releases).
+Linux x86_64 and ARM64 (`aarch64`) builds require glibc 2.35+, `libasound.so.2`, and `libdbus-1.so.3`
+(`libasound2` / `libasound2t64` and `libdbus-1-3` on Debian/Ubuntu). Extract the archive
+and run `./plavno`, or place it in `~/.local/bin`.
+
+Audio uses the ALSA default device; PipeWire/PulseAudio needs its ALSA plugin.
+Install ffmpeg for HLS playback. Optional Spotify and YouTube helpers are built separately.
+
+To build from source:
 
 ```sh
 cargo build --release

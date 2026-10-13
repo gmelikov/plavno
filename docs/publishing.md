@@ -1,4 +1,4 @@
-# Publishing to crates.io
+# Releases
 
 The main package is `plavno`; the first published version is `0.1.0`.
 Spotify and YouTube helpers remain separate binaries. Build them from a repository
@@ -34,8 +34,21 @@ gh workflow run publish.yml --ref master -f dry_run=true
    ```
 
 The tag must exactly match `v` plus the package version. A successful tag run uploads
-the verified package to crates.io. Manual runs default to dry run; actual publishing
-also requires selecting a matching version tag. Published versions are immutable.
+the verified package to crates.io. The separate [release workflow](../.github/workflows/release.yml)
+runs CI for that tag and creates a GitHub Release with Linux x86_64 and ARM64 binary archives
+and `SHA256SUMS`. It builds in Ubuntu 22.04 on a current runner and checks that the
+binary requires no newer glibc than 2.35. ALSA and D-Bus remain runtime dependencies;
+each archive contains the main player, README, and license. Alpine/musl and other CPU
+architectures require their own builds.
+
+To create a GitHub Release for an existing tag, without republishing the crate:
+
+```sh
+gh workflow run release.yml --ref master -f tag=v0.1.1
+```
+
+Manual `publish.yml` runs default to dry run; actual publishing also requires
+selecting a matching version tag. Published crate versions are immutable.
 
 Users install the release with `cargo install plavno --locked`. ALSA/D-Bus development
 packages are required during installation; see the [README](../README.md#quick-start).
