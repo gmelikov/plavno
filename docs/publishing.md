@@ -1,42 +1,56 @@
 # Publishing to crates.io
 
-The main package is `plavno`. Spotify and YouTube helpers are separate binaries;
-publishing the player does not install those helpers. Build them from a repository
+The main package is `plavno`; the first published version is `0.1.0`.
+Spotify and YouTube helpers remain separate binaries. Build them from a repository
 checkout using the [service setup instructions](services.md#spotify-and-youtube-music).
 
-## First release
+## Trusted Publishing
 
-1. Sign in to [crates.io](https://crates.io) with GitHub and verify your email.
-2. Create an API token with permission to publish new crates, then enter it at the
-   hidden prompt from `cargo login`.
-3. From a clean checkout with passing CI, verify the package:
+Configure the publisher for `gmelikov/plavno` on crates.io with workflow filename
+`publish.yml`. Leave GitHub Environment empty unless the publishing job also names
+that same environment.
+
+The [publishing workflow](../.github/workflows/publish.yml) runs all three CI jobs,
+checks that the release commit is on `master`, verifies the package, and obtains
+a short-lived token through GitHub OIDC. The token is revoked when the job ends;
+no crates.io API token secret is needed in GitHub.
+
+To test packaging and authentication without uploading:
+
+```sh
+gh workflow run publish.yml --ref master -f dry_run=true
+```
+
+## New releases
+
+1. Increase `package.version` in `Cargo.toml`, refresh `Cargo.lock` with `cargo check`,
+   and commit the change.
+2. Push `master`, then tag that release commit and push the tag. For example:
 
    ```sh
-   cargo publish --locked --dry-run
+   git push origin master
+   git tag -a v0.1.1 -m "v0.1.1"
+   git push origin v0.1.1
    ```
 
-4. Upload only when ready to release:
+The tag must exactly match `v` plus the package version. A successful tag run uploads
+the verified package to crates.io. Manual runs default to dry run; actual publishing
+also requires selecting a matching version tag. Published versions are immutable.
 
-   ```sh
-   cargo publish --locked
-   ```
+Users install the release with `cargo install plavno --locked`. ALSA/D-Bus development
+packages are required during installation; see the [README](../README.md#quick-start).
 
-Cargo verifies the packaged source before uploading. Inspect included files with
-`cargo package --list`. Source, tests, documentation, and the license are included;
-build artifacts and optional helper packages are excluded.
+## Manual fallback
 
-After publication, users can install the player with `cargo install plavno --locked`.
-Linux still requires ALSA/D-Bus development packages during installation; see the
-[README](../README.md#quick-start).
+From a clean checkout, authenticate with `cargo login`, then run:
 
-## Later releases
+```sh
+cargo publish --locked --dry-run
+cargo publish --locked
+```
 
-Increase `package.version` in `Cargo.toml`, update `Cargo.lock`, run checks, and
-commit before repeating the dry run and publish. Published version contents are
-immutable; fixes require a new version.
+Inspect archive contents with `cargo package --list`. The archive includes source,
+tests, documentation, and the license; build outputs and optional helpers are excluded.
 
-For automated releases, crates.io also supports [Trusted Publishing](https://github.com/rust-lang/crates-io-auth-action):
-configure a GitHub repository/workflow as a trusted publisher and exchange an OIDC
-identity for a short-lived token. The CI workflow currently runs checks only.
-
-Reference: [Cargo publishing guide](https://doc.rust-lang.org/cargo/reference/publishing.html).
+References: [Cargo publishing](https://doc.rust-lang.org/cargo/reference/publishing.html),
+[crates.io OIDC action](https://github.com/rust-lang/crates-io-auth-action).

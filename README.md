@@ -30,6 +30,8 @@ Requires Rust, pkg-config, ALSA and D-Bus headers: `libasound2-dev libdbus-1-dev
 (Debian/Ubuntu) or `alsa-lib-devel dbus-devel` (Fedora). Audio uses the ALSA default
 device; PipeWire/PulseAudio needs its ALSA plugin. Install ffmpeg for HLS playback.
 
+Install the published release with `cargo install plavno --locked`, or build from source:
+
 ```sh
 cargo build --release
 export PATH="$PWD/target/release:$PATH"
