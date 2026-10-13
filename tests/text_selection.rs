@@ -121,10 +121,10 @@ fn has_wave(screen: &str) -> bool {
         .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
 }
 
-fn pane_height(screen: &str) -> usize {
-    let top = screen.lines().position(|line| line.contains('╭')).unwrap();
-    let bottom = screen.lines().position(|line| line.contains('╰')).unwrap();
-    bottom - top + 1
+fn pane_height(screen: &str) -> Option<usize> {
+    let top = screen.lines().position(|line| line.contains('╭'))?;
+    let bottom = screen.lines().position(|line| line.contains('╰'))?;
+    bottom.checked_sub(top).map(|height| height + 1)
 }
 
 fn click_label(master: &mut File, output: &mut Vec<u8>, label: &str, below_panel: bool) {
@@ -338,32 +338,26 @@ fn tui_wave_toggle_restores_visualization_after_no_wave_startup() {
     master.write_all(b" ").unwrap();
     read_until(&mut master, &mut output, |bytes| {
         let screen = screen_text(bytes);
-        screen.contains("Local FLAC") && screen.contains("Paused")
+        screen.contains("Local FLAC") && screen.contains("Paused") && pane_height(&screen).is_some()
     });
     let screen = screen_text(&output);
     assert!(!has_wave(&screen));
     assert_eq!(screen.matches("plavno").count(), 1);
-    let collapsed = pane_height(&screen);
+    let collapsed = pane_height(&screen).unwrap();
     assert!(output.windows(6).any(|w| w == b"Visual"));
     master.write_all(b"v").unwrap();
     read_until(&mut master, &mut output, |bytes| {
-        has_wave(&screen_text(bytes))
+        let screen = screen_text(bytes);
+        has_wave(&screen) && pane_height(&screen).is_some_and(|height| height > collapsed)
     });
-    let expanded = pane_height(&screen_text(&output));
+    let expanded = pane_height(&screen_text(&output)).unwrap();
     assert!(expanded > collapsed);
-    let screen = screen_text(&output);
-    let (row, line) = screen
-        .lines()
-        .enumerate()
-        .find(|(_, line)| line.contains("v Visual"))
-        .unwrap();
-    let column = line.find("v Visual").unwrap() + 1;
-    master
-        .write_all(format!("\x1b[<0;{column};{}M\x1b[<0;{column};{}m", row + 1, row + 1).as_bytes())
-        .unwrap();
+    click_label(&mut master, &mut output, "v Visual", true);
     read_until(&mut master, &mut output, |bytes| {
         let screen = screen_text(bytes);
-        !has_wave(&screen) && pane_height(&screen) < expanded
+        !has_wave(&screen)
+            && pane_height(&screen).is_some_and(|height| height < expanded)
+            && screen.contains("Wave visualization disabled")
     });
     assert_eq!(screen_text(&output).matches("plavno").count(), 1);
     let screen = screen_text(&output);

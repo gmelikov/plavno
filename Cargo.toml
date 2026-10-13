@@ -3,6 +3,13 @@ name = "plavno"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+description = "A lightweight Linux terminal music player with service waves and library shuffle"
+repository = "https://github.com/gmelikov/plavno"
+readme = "README.md"
+keywords = ["music", "tui", "yandex", "vk", "player"]
+categories = ["command-line-utilities", "multimedia::audio"]
+publish = ["crates-io"]
+include = ["src/**", "tests/*.rs", "tests/fixtures/**", "docs/**", "Cargo.toml", "Cargo.lock", "LICENSE", "README.md", "intro.png"]
 
 [dependencies]
 anyhow = "1"

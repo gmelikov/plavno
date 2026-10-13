@@ -134,6 +134,8 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
+Release steps: [Publishing to crates.io](docs/publishing.md).
+
 ## License
 
 [Apache License 2.0](LICENSE).
