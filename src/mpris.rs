@@ -1,4 +1,4 @@
-use crate::engine::{Command, Engine, Event};
+use crate::engine::{Command, Engine, Event, MAX_SPEED, MIN_SPEED};
 use anyhow::{Context, Result, ensure};
 use dbus::{
     Message, MethodErr, Path,
@@ -40,6 +40,7 @@ struct Snapshot {
     track: Option<TrackInfo>,
     position: i64,
     volume: f64,
+    rate: f64,
     capabilities: [bool; 5],
 }
 
@@ -79,6 +80,7 @@ impl Snapshot {
             }),
             position: (engine.seconds() * 1_000_000.0) as i64,
             volume: f64::from(engine.volume),
+            rate: f64::from(engine.speed),
             capabilities: [
                 engine.can_next(),
                 engine.can_previous(),
@@ -117,6 +119,9 @@ impl Snapshot {
         }
         if self.volume != old.volume {
             property(&mut map, "Volume", self.volume);
+        }
+        if self.rate != old.rate {
+            property(&mut map, "Rate", self.rate);
         }
         for (index, name) in CAPABILITIES.iter().enumerate() {
             if self.capabilities[index] != old.capabilities[index] {
@@ -251,16 +256,20 @@ fn interfaces(snapshot: Arc<Mutex<Snapshot>>, events: mpsc::Sender<Event>) -> Cr
         b.property::<bool, _>("CanControl")
             .get(|_, _: &mut Object| Ok(true))
             .emits_changed_const();
-        for name in ["MinimumRate", "MaximumRate"] {
+        for (name, rate) in [("MinimumRate", MIN_SPEED), ("MaximumRate", MAX_SPEED)] {
             b.property::<f64, _>(name)
-                .get(|_, _: &mut Object| Ok(1.0))
+                .get(move |_, _: &mut Object| Ok(rate))
                 .emits_changed_const();
         }
         b.property::<f64, _>("Rate")
-            .get(|_, _: &mut Object| Ok(1.0))
+            .get(|_, object: &mut Object| Ok(object.snapshot.lock().unwrap().rate))
             .set(|_, object: &mut Object, rate| {
                 if rate == 0.0 {
                     object.command(Command::Pause)?;
+                } else if rate.is_finite() && (MIN_SPEED..=MAX_SPEED).contains(&rate) {
+                    object.command(Command::Rate(rate))?;
+                } else {
+                    return Err(MethodErr::invalid_arg(&rate));
                 }
                 Ok(None)
             });
@@ -398,6 +407,7 @@ mod tests {
             status: "Playing",
             position: 12_000_000,
             volume: 1.0,
+            rate: 1.0,
             track: Some(TrackInfo {
                 path: Path::new("/plavno/track/test").unwrap(),
                 title: "Test track".into(),
@@ -468,6 +478,22 @@ mod tests {
             matches!(receiver.recv_timeout(Duration::from_secs(2)).unwrap(), Event::Control(Command::Volume(v)) if v == 0.25)
         );
         assert!(proxy.set(PLAYER, "Volume", f64::NAN).is_err());
+        assert_eq!(proxy.get::<f64>(PLAYER, "MinimumRate").unwrap(), 0.1);
+        assert_eq!(proxy.get::<f64>(PLAYER, "MaximumRate").unwrap(), 2.0);
+        assert_eq!(proxy.get::<f64>(PLAYER, "Rate").unwrap(), 1.0);
+        proxy.set(PLAYER, "Rate", 0.1f64).unwrap();
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Event::Control(Command::Rate(0.1))
+        ));
+        proxy.set(PLAYER, "Rate", 1.25f64).unwrap();
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Event::Control(Command::Rate(1.25))
+        ));
+        for rate in [0.05, 2.5, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(proxy.set(PLAYER, "Rate", rate).is_err());
+        }
         proxy.set(PLAYER, "Rate", 0.0f64).unwrap();
         assert!(matches!(
             receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
@@ -521,6 +547,7 @@ mod tests {
             let mut state = server.snapshot.lock().unwrap();
             state.status = "Paused";
             state.volume = 0.25;
+            state.rate = 1.25;
             state.position = 13_000_000;
             state.track.as_mut().unwrap().title = "Another track".into();
             state.track.as_mut().unwrap().cover_url = Some("https://example.com/second.jpg".into());
@@ -534,7 +561,13 @@ mod tests {
         {
             let changes = changes.lock().unwrap();
             let changed = &changes[0];
-            for name in ["PlaybackStatus", "Volume", "Metadata", "CanGoPrevious"] {
+            for name in [
+                "PlaybackStatus",
+                "Volume",
+                "Rate",
+                "Metadata",
+                "CanGoPrevious",
+            ] {
                 assert!(changed.contains_key(name), "Missing {name}");
             }
             assert!(!changed.contains_key("Position"));

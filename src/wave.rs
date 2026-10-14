@@ -49,7 +49,7 @@ impl Wave {
             self.pulse = 0.0;
             self.peak = 0.0;
         }
-        self.active = engine.track().is_some() && !engine.paused;
+        self.active = engine.track().is_some() && (!engine.paused || engine.is_scrubbing());
         if engine.track().is_none() {
             self.rms = 0.0;
             self.bass = 0.0;

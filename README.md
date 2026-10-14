@@ -121,6 +121,7 @@ Buttons display their hotkeys and support mouse clicks.
 | ← / → | Seek 5 seconds; Shift or Ctrl: 30 seconds |
 | Home / End | Start / end of track |
 | + / - | Volume; also click beside the percentage |
+| [ / ] | Playback speed: 0.1–2x, step 0.05; click buttons or scroll over Speed |
 | l | Like / unlike in Yandex favorites or VK My Music |
 | d / u | Dislike and skip / undo dislike |
 | h or / | History: type to search, ↑/↓ select, Enter play |
@@ -131,10 +132,13 @@ Buttons display their hotkeys and support mouse clicks.
 | Ctrl+C | Copy selected text; quit when nothing is selected |
 | Esc / q | Clear selection or close a view / quit |
 
-Click or drag the progress bar to seek. Scroll over it to seek; elsewhere scroll
-changes volume. Drag over the title or artist and press Ctrl+C to copy (requires
-terminal OSC 52 support). In History and Sources, click to select, double-click
-to play, scroll to navigate, and right-click to close.
+Hover over the album artwork: the left third plays the previous track, the center
+toggles playback, and the right third plays the next track. Click the progress bar
+to jump, or drag it for audible 2–4x scrubbing. Scroll over the bar to seek, over
+Speed to change the rate, and elsewhere to change volume. Drag over the title or
+artist and press Ctrl+C to copy (requires terminal OSC 52 support). In History and
+Sources, click to select, double-click to play, scroll to navigate, and right-click
+to close.
 
 Flow changes recommendations. Work requests calm ambient without vocals on Yandex
 and calm instrumental tracks on VK. `w` returns from library shuffle to a new wave;
@@ -149,7 +153,8 @@ RAM use depends on track size. Service audio is not saved to disk.
 Configuration lives in `~/.config/plavno`; history and permanent dislikes live in
 `~/.local/state/plavno`. `XDG_CONFIG_HOME` and `XDG_STATE_HOME` override these roots.
 History stores metadata for the last 2000 plays. Yandex and VK also receive account
-dislikes; `u` undoes them. Volume starts at 100%.
+dislikes; `u` undoes them. Volume starts at 100%, speed at 1x. Changing speed also
+changes pitch.
 
 Media keys and `playerctl` work through session D-Bus, for example:
 `playerctl -p plavno play-pause` or `playerctl -p plavno position 5+`.

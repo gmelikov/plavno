@@ -18,6 +18,7 @@ use std::{
 };
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 const VK_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_MESSAGE: usize = 8 * 1024 * 1024;
@@ -327,7 +328,12 @@ impl Browser {
 
     fn call(&mut self, method: &str, params: Value, session: Option<&str>) -> Result<Value> {
         let id = self.send(method, params, session)?;
-        let deadline = Instant::now() + RPC_TIMEOUT;
+        let deadline = Instant::now()
+            + if id == 1 {
+                STARTUP_TIMEOUT
+            } else {
+                RPC_TIMEOUT
+            };
         while let Some(message) = self.receive(deadline)? {
             if message["id"].as_u64() == Some(id) {
                 ensure!(
@@ -341,7 +347,7 @@ impl Browser {
             }
         }
         bail!(
-            "Browser did not respond; check the graphical session and Chrome/Chromium installation"
+            "Browser did not respond to {method}; check the graphical session and Chrome/Chromium installation"
         )
     }
 

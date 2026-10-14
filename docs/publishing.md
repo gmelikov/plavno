@@ -29,8 +29,8 @@ gh workflow run publish.yml --ref master -f dry_run=true
 
    ```sh
    git push origin master
-   git tag -a v0.1.1 -m "v0.1.1"
-   git push origin v0.1.1
+   git tag -a v0.2.0 -m "v0.2.0"
+   git push origin v0.2.0
    ```
 
 The tag must exactly match `v` plus the package version. A successful tag run uploads
@@ -44,7 +44,7 @@ architectures require their own builds.
 To create a GitHub Release for an existing tag, without republishing the crate:
 
 ```sh
-gh workflow run release.yml --ref master -f tag=v0.1.1
+gh workflow run release.yml --ref master -f tag=v0.2.0
 ```
 
 Manual `publish.yml` runs default to dry run; actual publishing also requires

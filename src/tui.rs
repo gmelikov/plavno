@@ -25,7 +25,7 @@ use ratatui::{
     layout::{Constraint, Flex, Layout, Rect},
     style::{Color, Style},
     text::Line,
-    widgets::{Block, BorderType, Gauge, Paragraph, Widget, Wrap},
+    widgets::{Block, BorderType, Paragraph, Widget, Wrap},
 };
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
@@ -138,16 +138,22 @@ pub fn run(
             && sources.is_none()
             && flow.is_none()
             && engine.track().is_some()
-            && !engine.paused;
+            && (!engine.paused || engine.is_scrubbing());
         let wait = if updating {
             frame_interval.saturating_sub(last_draw.elapsed())
         } else {
             Duration::from_millis(250)
         };
+        let wait = if engine.is_scrubbing() {
+            wait.min(Duration::from_millis(10))
+        } else {
+            wait
+        };
         match receiver.recv_timeout(wait) {
             Ok(Event::Terminal(event::Event::FocusLost)) => {
                 controls.cancel_drag();
                 selection.cancel_drag();
+                dirty = true;
                 if let Some(flow) = &mut flow {
                     flow.cancel_press();
                 }
@@ -221,6 +227,10 @@ pub fn run(
                                     engine.seek_to(position);
                                     None
                                 }
+                                Some(controls::Action::Scrub { position, speed }) => {
+                                    engine.scrub_to(position, speed);
+                                    None
+                                }
                                 Some(controls::Action::VolumeDelta(delta)) => {
                                     engine.change_volume(delta);
                                     None
@@ -245,6 +255,10 @@ pub fn run(
                         event::Event::Key(key)
                             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                         {
+                            if controls.is_seeking() {
+                                controls.cancel_drag();
+                                engine.end_scrub();
+                            }
                             if key.kind == KeyEventKind::Repeat
                                 && !matches!(
                                     key.code,
@@ -372,6 +386,8 @@ pub fn run(
                                     engine.change_volume(0.05)
                                 }
                                 KeyCode::Char('-') => engine.change_volume(-0.05),
+                                KeyCode::Char('[') => engine.change_speed(-0.05),
+                                KeyCode::Char(']') => engine.change_speed(0.05),
                                 _ => continue,
                             }
                         }
@@ -390,6 +406,9 @@ pub fn run(
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
+        if !controls.is_seeking() {
+            engine.end_scrub();
+        }
         dirty |= engine.tick();
         if (dirty || last_mpris.elapsed() >= Duration::from_millis(250))
             && let Some(mpris) = &mpris
@@ -401,7 +420,7 @@ pub fn run(
             && sources.is_none()
             && flow.is_none()
             && engine.track().is_some()
-            && !engine.paused
+            && (!engine.paused || engine.is_scrubbing())
             && last_draw.elapsed() >= frame_interval
         {
             dirty = true;
@@ -431,8 +450,11 @@ fn draw(
     let favorites = engine.favorites_supported || engine.source == "mixed";
     let quality = engine.quality().unwrap_or_default();
     let volume = format!("Volume: {:.0}%", engine.volume * 100.0);
+    let speed = format!("Speed: {:.2}x", engine.speed);
     let queue = format!(" · Queued: {}", engine.queue_len());
-    let state = if engine.loading {
+    let state = if engine.is_scrubbing() {
+        "Scrubbing"
+    } else if engine.loading {
         "Loading"
     } else if engine.playback_status() == "Stopped" {
         "Stopped"
@@ -445,7 +467,23 @@ fn draw(
     } else {
         "Stopped"
     };
-    let notice_width = width.saturating_sub(quality.width() as u16 + 2);
+    let status = if selection.range().is_some() {
+        format!("{state} · Ctrl+C copy · Esc clear")
+    } else {
+        state.to_owned()
+    };
+    let favorite = if favorites && engine.can_like() {
+        if engine.is_liked() {
+            "♥ In favorites · l to remove"
+        } else if engine.favorite_state().is_some() {
+            "♡ l to add to favorites"
+        } else {
+            "Favorites: ? · l to check and toggle"
+        }
+    } else {
+        ""
+    };
+    let notice_width = width.saturating_sub(status.width().max(favorite.width()) as u16 + 2);
     let notice_rows = if compact
         || !engine.message.contains('\n') && engine.message.width() <= usize::from(notice_width)
     {
@@ -454,8 +492,8 @@ fn draw(
         2
     };
     let detail_rows = if favorites { 3u16 } else { 2 } + notice_rows - 1;
-    let progress_rows = if compact { 1 } else { 3 };
-    let control_rows = Controls::height(frame.area().width.saturating_sub(2), engine);
+    let progress_rows = 1;
+    let control_rows = Controls::height(width, engine);
     let track_text = engine.media_track().map(|track| {
         let artist = if !track.source.is_empty() && track.source != engine.source {
             format!("{} · {}", track.artist, track.source)
@@ -483,15 +521,11 @@ fn draw(
     } else {
         0
     };
-    let rows = Layout::vertical([
-        if wave.is_some() {
-            Constraint::Min(0)
-        } else {
-            Constraint::Length(2 + identity_rows + detail_rows)
-        },
-        Constraint::Length(progress_rows),
-        Constraint::Length(control_rows),
-    ])
+    let rows = Layout::vertical([if wave.is_some() {
+        Constraint::Min(0)
+    } else {
+        Constraint::Length(2 + identity_rows + detail_rows + progress_rows + control_rows)
+    }])
     .flex(Flex::Start)
     .margin(1)
     .split(frame.area());
@@ -520,17 +554,19 @@ fn draw(
         .title(Line::from(format!(" plavno · {service} ")).style(accent));
     let inner = pane.inner(rows[0]);
     frame.render_widget(pane, rows[0]);
-    if let Some(wave) = wave {
-        artwork.render(inner, frame.buffer_mut());
-        frame.render_widget(wave, inner);
-    }
     let content = Rect::new(
         inner.x.saturating_add(1),
         inner.y,
         inner.width.saturating_sub(2),
         inner.height,
     );
-    let details = content;
+    let rows = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(progress_rows),
+        Constraint::Length(control_rows),
+    ])
+    .split(content);
+    let details = rows[0];
     let footer_rows = detail_rows.min(details.height.saturating_sub(identity_min));
     let notice_rows = notice_rows.min(footer_rows.saturating_sub(1).max(1));
     let identity = Rect::new(
@@ -539,49 +575,52 @@ fn draw(
         content.width,
         details.height.saturating_sub(footer_rows),
     );
+    let text_height = track_text.as_ref().map_or(0, |(key, text)| {
+        selection.height(key, text, identity.width, identity.height)
+    });
+    if let Some(wave) = wave {
+        artwork.render(inner, frame.buffer_mut());
+        frame.render_widget(wave, details);
+    }
+    controls.draw_transport(
+        frame,
+        inner,
+        Rect::new(identity.x, identity.y, identity.width, text_height),
+        engine,
+    );
     if let Some((key, text)) = track_text {
         selection.render(&key, &text, identity, frame.buffer_mut());
     } else {
         *selection = TextSelection::default();
     }
     let style = Style::default().fg(Color::Gray);
+    let settings_width = (volume.width() + speed.width() + queue.width() + 15)
+        .min(usize::from(content.width)) as u16;
     if footer_rows > 0 {
-        let status = if selection.range().is_some() {
-            format!("{state} · Ctrl+C copy · Esc clear")
-        } else {
-            state.to_owned()
-        };
-        let volume_width =
-            (volume.width() + queue.width() + 6).min(usize::from(content.width)) as u16;
         let status_width = status
             .width()
-            .min(usize::from(content.width.saturating_sub(volume_width + 2)))
+            .min(usize::from(content.width.saturating_sub(notice_width + 2)))
             as u16;
         let row = details.bottom() - footer_rows;
         frame.render_widget(
             Line::from(status).style(accent),
             Rect::new(content.x, row, status_width, 1),
         );
-        controls.draw_volume(
+        controls.draw_settings(
             frame,
-            Rect::new(content.right() - volume_width, row, volume_width, 1),
+            Rect::new(
+                content.right() - settings_width,
+                details.bottom() - 1,
+                settings_width,
+                1,
+            ),
             &volume,
+            &speed,
             &queue,
         );
     }
     if favorites && footer_rows >= 2 + notice_rows {
-        let line = if engine.can_like() {
-            Line::from(if engine.is_liked() {
-                "♥ In favorites · l to remove"
-            } else if engine.favorite_state().is_some() {
-                "♡ l to add to favorites"
-            } else {
-                "Favorites: ? · l to check and toggle"
-            })
-            .style(accent)
-        } else {
-            Line::default()
-        };
+        let line = Line::from(favorite).style(accent);
         let width = line.width().min(usize::from(content.width)) as u16;
         frame.render_widget(
             line,
@@ -589,16 +628,22 @@ fn draw(
         );
     }
     if footer_rows >= 2 {
-        let quality_width = quality.width().min(usize::from(content.width)) as u16;
-        let row = details.bottom() - notice_rows;
+        let quality_width = quality.width().min(usize::from(
+            content.width.saturating_sub(settings_width + 2),
+        )) as u16;
         frame.render_widget(
             Line::from(quality).style(style),
-            Rect::new(content.x, row, quality_width, 1),
+            Rect::new(content.x, details.bottom() - 1, quality_width, 1),
         );
-        let width = content.width.saturating_sub(quality_width + 2);
+        let width = notice_width.min(content.width);
         overlay_notice(
             engine.message.as_str(),
-            Rect::new(content.right() - width, row, width, notice_rows),
+            Rect::new(
+                content.right() - width,
+                details.bottom() - footer_rows,
+                width,
+                notice_rows,
+            ),
             frame.buffer_mut(),
         );
     }
@@ -607,29 +652,41 @@ fn draw(
     let ratio = duration
         .filter(|d| *d > 0.0)
         .map_or(0.0, |d| (seconds / d).clamp(0.0, 1.0));
-    let seek_area = if compact {
-        rows[1]
-    } else {
-        Block::bordered().inner(rows[1])
-    };
-    let progress = Gauge::default()
-        .gauge_style(accent)
-        .ratio(ratio)
-        .label(format!(
+    overlay_progress(
+        ratio,
+        &format!(
             "{} / {}",
             clock(seconds),
             duration.map_or("—:—".into(), clock)
-        ));
-    frame.render_widget(
-        if compact {
-            progress
-        } else {
-            progress.block(Block::bordered())
-        },
+        ),
         rows[1],
+        frame.buffer_mut(),
     );
-    controls.seek = seek_area;
+    controls.seek = rows[1];
     controls.draw(frame, rows[2], engine, wave.is_some());
+}
+
+fn overlay_progress(ratio: f64, label: &str, area: Rect, buffer: &mut Buffer) {
+    if area.is_empty() {
+        return;
+    }
+    let position = (ratio * f64::from(area.width.saturating_sub(1))).round() as u16;
+    for x in 0..area.width {
+        buffer[(area.x + x, area.y)]
+            .set_symbol(if x == position { "●" } else { "━" })
+            .set_fg(if x <= position {
+                Color::Cyan
+            } else {
+                Color::Rgb(70, 85, 100)
+            });
+    }
+    let width = label.width().min(usize::from(area.width)) as u16;
+    Line::from(label)
+        .style(Style::default().fg(Color::White))
+        .render(
+            Rect::new(area.x + (area.width - width) / 2, area.y, width, 1),
+            buffer,
+        );
 }
 
 fn overlay_notice(text: &str, area: Rect, buffer: &mut Buffer) {
@@ -660,6 +717,27 @@ fn clock(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_overlays_the_cover_without_erasing_its_background() {
+        let area = Rect::new(2, 3, 20, 1);
+        let mut buffer = Buffer::empty(area);
+        for ratio in [0.0, 0.5, 1.0] {
+            for cell in &mut buffer.content {
+                cell.set_char('▀').set_bg(Color::Rgb(12, 24, 36));
+            }
+            overlay_progress(ratio, "0:30 / 1:00", area, &mut buffer);
+            assert!(
+                buffer
+                    .content
+                    .iter()
+                    .all(|cell| cell.bg == Color::Rgb(12, 24, 36))
+            );
+            let line: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+            assert!(line.contains("0:30 / 1:00"));
+            assert_eq!(buffer[(area.x, area.y)].fg, Color::Cyan);
+        }
+    }
 
     #[test]
     fn notices_wrap_inside_the_panel_without_erasing_its_background() {

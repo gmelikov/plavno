@@ -13,7 +13,11 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
     },
+    time::{Duration, Instant},
 };
+
+pub const MIN_SPEED: f64 = 0.1;
+pub const MAX_SPEED: f64 = 2.0;
 
 pub enum Event {
     Terminal(TerminalEvent),
@@ -37,6 +41,7 @@ pub enum Command {
     Next,
     Previous,
     Volume(f64),
+    Rate(f64),
     Seek(f64),
     SetPosition((u64, u64), f64),
     Quit,
@@ -68,6 +73,19 @@ struct Playing {
 struct Seeking {
     position: f64,
     listened: f64,
+}
+
+struct Scrubbing {
+    position: f64,
+    speed: f32,
+    active_speed: f32,
+    listened: f64,
+    dispatched: Option<(f64, Instant)>,
+}
+
+enum Preparation {
+    Playback(f64),
+    Scrub { position: f64, reverse: bool },
 }
 
 struct Prefetch {
@@ -114,7 +132,7 @@ fn prepare(
     track: Track,
     load: impl FnOnce() -> Result<Arc<CachedAudio>> + Send + 'static,
     cancel: Arc<AtomicBool>,
-    position: f64,
+    at: Preparation,
 ) {
     let tx = events.clone();
     let error_track = track.clone();
@@ -128,10 +146,14 @@ fn prepare(
             .and_then(|buffer| {
                 anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Loading cancelled");
                 let _ = tx.send(Event::Cached(epoch, serial, track.clone(), buffer.clone()));
-                if position == 0.0 {
-                    crate::audio::prepare(buffer, cancel)
-                } else {
-                    crate::audio::prepare_at(buffer, cancel, position)
+                match at {
+                    Preparation::Playback(0.0) => crate::audio::prepare(buffer, cancel),
+                    Preparation::Playback(position) => {
+                        crate::audio::prepare_at(buffer, cancel, position)
+                    }
+                    Preparation::Scrub { position, reverse } => {
+                        crate::audio::prepare_scrub_at(buffer, cancel, position, reverse)
+                    }
                 }
             })
             .map(Box::new);
@@ -181,6 +203,7 @@ pub struct Engine {
     pub favorites_supported: bool,
     pub paused: bool,
     pub volume: f32,
+    pub speed: f32,
     pub message: String,
     pub loading: bool,
     queue: TrackQueue,
@@ -202,6 +225,7 @@ pub struct Engine {
     active_serial: u64,
     playback_serial: u64,
     seeking: Option<Seeking>,
+    scrubbing: Option<Scrubbing>,
     pub seek_revision: u64,
     prefetch: Option<Prefetch>,
     batch_pending: bool,
@@ -340,7 +364,7 @@ impl Engine {
                                         track,
                                         move || crate::audio::cache_input(input),
                                         cancel,
-                                        0.0,
+                                        Preparation::Playback(0.0),
                                     );
                                     continue;
                                 }
@@ -370,6 +394,7 @@ impl Engine {
                 stopped: false,
                 paused: false,
                 volume: 1.0,
+                speed: 1.0,
                 message: String::new(),
                 loading: false,
                 queue: TrackQueue::default(),
@@ -385,6 +410,7 @@ impl Engine {
                 active_serial: 0,
                 playback_serial: 0,
                 seeking: None,
+                scrubbing: None,
                 seek_revision: 0,
                 prefetch: None,
                 batch_pending: false,
@@ -414,7 +440,7 @@ impl Engine {
                 track,
                 move || Ok(buffer),
                 cancel,
-                0.0,
+                Preparation::Playback(0.0),
             );
         } else {
             self.request(Request::Resolve(self.epoch, serial, track, cancel));
@@ -666,6 +692,7 @@ impl Engine {
 
     fn finish(&mut self, kind: Feedback) -> Option<Track> {
         self.seeking = None;
+        let listened = self.scrubbing.take().map(|scrub| scrub.listened);
         self.cancel.store(true, Ordering::Relaxed);
         self.audio.sink.stop();
         if let Some(playing) = self.current.take() {
@@ -673,7 +700,7 @@ impl Engine {
                 self.epoch,
                 playing.track.clone(),
                 kind,
-                playing.listened(),
+                listened.unwrap_or_else(|| playing.listened()),
             ));
             return Some(playing.track);
         }
@@ -692,6 +719,20 @@ impl Engine {
     pub fn change_volume(&mut self, delta: f32) {
         self.volume = (self.volume + delta).clamp(0.0, 1.0);
         self.audio.sink.set_volume(self.volume);
+    }
+
+    pub fn change_speed(&mut self, delta: f32) {
+        self.set_speed(f64::from(self.speed + delta));
+    }
+
+    fn set_speed(&mut self, speed: f64) {
+        if !speed.is_finite() {
+            return;
+        }
+        self.speed = (speed.clamp(MIN_SPEED, MAX_SPEED) * 20.0).round() as f32 / 20.0;
+        if !self.is_scrubbing() {
+            self.audio.sink.set_speed(self.speed);
+        }
     }
 
     fn control(&mut self, command: Command) {
@@ -738,6 +779,7 @@ impl Engine {
                 self.volume = volume.clamp(0.0, 1.0) as f32;
                 self.audio.sink.set_volume(self.volume);
             }
+            Command::Rate(speed) => self.set_speed(speed),
             Command::Seek(offset) if offset.is_finite() && self.can_seek() => {
                 let position = self.seconds() + offset;
                 if self
@@ -761,7 +803,8 @@ impl Engine {
         if !self.can_seek() || !position.is_finite() || position < 0.0 {
             return;
         }
-        if self.preparing
+        if self.scrubbing.is_none()
+            && self.preparing
             && self
                 .seeking
                 .as_ref()
@@ -770,7 +813,10 @@ impl Engine {
             return;
         }
         let playing = self.current.as_ref().unwrap();
-        if self.seeking.is_none() && (playing.seconds() - position).abs() < 0.001 {
+        if self.scrubbing.is_none()
+            && self.seeking.is_none()
+            && (playing.seconds() - position).abs() < 0.001
+        {
             return;
         }
         if playing
@@ -782,12 +828,13 @@ impl Engine {
         }
         let track = playing.track.clone();
         let buffer = playing.buffer.clone();
+        let listened = self
+            .scrubbing
+            .take()
+            .map_or_else(|| playing.listened(), |scrub| scrub.listened);
         self.cancel.store(true, Ordering::Relaxed);
         self.audio.sink.stop();
-        self.seeking = Some(Seeking {
-            position,
-            listened: playing.listened(),
-        });
+        self.seeking = Some(Seeking { position, listened });
         self.serial += 1;
         self.active_serial = self.serial;
         self.cancel = Arc::new(AtomicBool::new(false));
@@ -801,8 +848,98 @@ impl Engine {
             track,
             move || Ok(buffer),
             self.cancel.clone(),
-            position,
+            Preparation::Playback(position),
         );
+    }
+
+    pub fn is_scrubbing(&self) -> bool {
+        self.scrubbing.is_some()
+    }
+
+    pub fn scrub_to(&mut self, position: f64, speed: f32) {
+        if !self.can_seek() || !position.is_finite() || position < 0.0 || !speed.is_finite() {
+            return;
+        }
+        let playing = self.current.as_ref().unwrap();
+        let position = playing
+            .track
+            .duration
+            .map_or(position, |duration| position.min(duration));
+        let speed = if speed < 0.0 {
+            -speed.abs().clamp(2.0, 4.0)
+        } else {
+            speed.clamp(2.0, 4.0)
+        };
+        let scrub = self.scrubbing.get_or_insert_with(|| Scrubbing {
+            position,
+            speed,
+            active_speed: speed,
+            listened: self
+                .seeking
+                .as_ref()
+                .map_or_else(|| playing.listened(), |seek| seek.listened),
+            dispatched: None,
+        });
+        scrub.position = position;
+        scrub.speed = speed;
+        self.message = format!(
+            "Scrubbing {} {:.1}x",
+            if speed < 0.0 { "←" } else { "→" },
+            speed.abs()
+        );
+        self.prepare_scrub();
+    }
+
+    fn prepare_scrub(&mut self) -> bool {
+        let Some(scrub) = &mut self.scrubbing else {
+            return false;
+        };
+        if self.preparing
+            || scrub.dispatched.is_some_and(|(position, started)| {
+                (position - scrub.position).abs() < 0.001
+                    || started.elapsed() < Duration::from_millis(50)
+            })
+        {
+            return false;
+        }
+        let Some(playing) = &self.current else {
+            return false;
+        };
+        let position = scrub.position;
+        let reverse = scrub.speed < 0.0;
+        if scrub.dispatched.is_none() {
+            self.audio.sink.stop();
+        }
+        scrub.dispatched = Some((position, Instant::now()));
+        scrub.active_speed = scrub.speed;
+        self.seeking = Some(Seeking {
+            position,
+            listened: scrub.listened,
+        });
+        self.cancel.store(true, Ordering::Relaxed);
+        self.serial += 1;
+        self.active_serial = self.serial;
+        self.cancel = Arc::new(AtomicBool::new(false));
+        self.preparing = true;
+        prepare(
+            &self.events,
+            self.epoch,
+            self.serial,
+            playing.track.clone(),
+            {
+                let buffer = playing.buffer.clone();
+                move || Ok(buffer)
+            },
+            self.cancel.clone(),
+            Preparation::Scrub { position, reverse },
+        );
+        true
+    }
+
+    pub fn end_scrub(&mut self) {
+        if let Some(scrub) = &self.scrubbing {
+            self.seek_to(scrub.position);
+        }
     }
 
     fn advance(&mut self, kind: Feedback) {
@@ -1111,7 +1248,14 @@ impl Engine {
                         if track.duration.is_none() {
                             track.duration = prepared.duration;
                         }
-                        self.audio.play(prepared.source, self.paused, self.volume);
+                        self.audio.play(
+                            prepared.source,
+                            self.paused && self.scrubbing.is_none(),
+                            self.volume,
+                            self.scrubbing
+                                .as_ref()
+                                .map_or(self.speed, |scrub| scrub.active_speed.abs()),
+                        );
                         let seeking = self.seeking.take();
                         if seeking.is_some() {
                             self.seek_revision += 1;
@@ -1139,7 +1283,9 @@ impl Engine {
                             listened: seeking.map_or(0.0, |s| s.listened),
                         });
                         self.selected = None;
-                        self.message.clear();
+                        if self.scrubbing.is_none() {
+                            self.message.clear();
+                        }
                         if self.queue.upcoming.len() < 2 && !self.exhausted {
                             self.more();
                         }
@@ -1209,6 +1355,9 @@ impl Engine {
     }
 
     pub fn tick(&mut self) -> bool {
+        if self.scrubbing.is_some() {
+            return self.prepare_scrub();
+        }
         if let Some(playing) = &self.current
             && !self.preparing
             && self.seeking.is_none()
@@ -1293,6 +1442,9 @@ impl Engine {
         self.current.is_some() && !self.stopped
     }
     pub fn seconds(&self) -> f64 {
+        if let Some(scrub) = &self.scrubbing {
+            return scrub.position;
+        }
         self.seeking.as_ref().map_or_else(
             || self.current.as_ref().map_or(0.0, Playing::seconds),
             |s| s.position,
@@ -1305,7 +1457,11 @@ impl Engine {
     }
 
     pub fn levels(&self) -> Levels {
-        if self.paused || self.preparing || self.buffering() || self.current.is_none() {
+        if self.paused && !self.is_scrubbing()
+            || self.preparing
+            || self.buffering()
+            || self.current.is_none()
+        {
             return Levels::default();
         }
         let mut levels = Levels::unpack(
@@ -1579,6 +1735,125 @@ mod tests {
                 engine.handle(event);
             }
         }
+    }
+
+    #[test]
+    fn scrubbing_coalesces_cached_previews_and_restores_exact_position_pause_and_feedback() {
+        if std::env::var_os("PLAVNO_SCRUB_TEST_CHILD").is_none() {
+            let config =
+                std::env::temp_dir().join(format!("plavno-scrub-alsa-{}.conf", std::process::id()));
+            std::fs::write(&config, "pcm.!default { type null }\n").unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "engine::tests::scrubbing_coalesces_cached_previews_and_restores_exact_position_pause_and_feedback", "--nocapture"])
+                .env("PLAVNO_SCRUB_TEST_CHILD", "1")
+                .env("ALSA_CONFIG_PATH", &config)
+                .output();
+            std::fs::remove_file(config).unwrap();
+            let result = result.unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        let log = Arc::new(Mutex::new(ServiceLog::default()));
+        let (mut engine, _, events) = Engine::new(Box::new(TestBackend(log.clone()))).unwrap();
+        engine.paused = true;
+        assert_eq!(engine.speed, 1.0);
+        for _ in 0..19 {
+            engine.change_speed(-0.05);
+        }
+        assert_eq!(engine.speed, MIN_SPEED as f32);
+        assert_eq!(engine.audio.sink.speed(), MIN_SPEED as f32);
+        for _ in 0..39 {
+            engine.change_speed(0.05);
+        }
+        assert_eq!(engine.speed, MAX_SPEED as f32);
+        for speed in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            engine.control(Command::Rate(speed));
+            assert_eq!(engine.speed, MAX_SPEED as f32);
+        }
+        engine.control(Command::Rate(1.25));
+        engine.start();
+        pump(&mut engine, &events, prefetch_ready);
+        assert_eq!(engine.audio.sink.speed(), 1.25);
+        let playing = engine.current.as_ref().unwrap();
+        playing
+            .progress
+            .samples
+            .store(playing.samples_per_second * 2, Ordering::Relaxed);
+        let playback = engine.playback_id();
+        let resolved = log.lock().unwrap().resolved.len();
+        engine.scrub_to(12.0, 4.0);
+        let serial = engine.active_serial;
+        assert_eq!(engine.seconds(), 12.0);
+        // A busy pointer replaces only the pending target, even while decoding is in flight.
+        for step in 1..=100 {
+            engine.scrub_to(12.0 + f64::from(step) / 10.0, -6.0);
+        }
+        assert_eq!(engine.active_serial, serial);
+        assert_eq!(engine.seconds(), 22.0);
+        pump(&mut engine, &events, |engine| !engine.preparing);
+        assert!(engine.is_scrubbing());
+        assert!(engine.paused);
+        assert!(!engine.audio.sink.is_paused());
+        assert_eq!(engine.audio.sink.speed(), 4.0);
+        engine.change_speed(0.05);
+        assert_eq!(engine.speed, 1.3);
+        assert_eq!(engine.audio.sink.speed(), 4.0);
+        engine
+            .scrubbing
+            .as_mut()
+            .unwrap()
+            .dispatched
+            .as_mut()
+            .unwrap()
+            .1 = Instant::now() - Duration::from_millis(100);
+        assert!(engine.tick());
+        pump(&mut engine, &events, |engine| !engine.preparing);
+        assert_eq!(engine.audio.sink.speed(), 4.0);
+        engine.audio.sink.stop();
+        assert!(!engine.tick(), "A finished preview advanced the track");
+        assert_eq!(engine.playback_id(), playback);
+        // Finish while the final preview is still preparing, as a rapid mouse release does.
+        engine
+            .scrubbing
+            .as_mut()
+            .unwrap()
+            .dispatched
+            .as_mut()
+            .unwrap()
+            .1 = Instant::now() - Duration::from_millis(100);
+        engine.scrub_to(23.0, -8.0);
+        assert!(engine.preparing);
+        engine.end_scrub();
+        pump(&mut engine, &events, |engine| !engine.preparing);
+        assert!(!engine.is_scrubbing());
+        assert_eq!(engine.seconds(), 23.0);
+        assert!(engine.paused && engine.audio.sink.is_paused());
+        assert_eq!(engine.audio.sink.speed(), 1.3);
+        assert_eq!(engine.current.as_ref().unwrap().listened(), 2.0);
+        assert_eq!(engine.playback_id(), playback);
+        assert_eq!(engine.history.len(), 1);
+        assert_eq!(log.lock().unwrap().resolved.len(), resolved);
+        assert_eq!(log.lock().unwrap().feedback.len(), 1);
+        engine.control(Command::Play);
+        engine.scrub_to(24.0, 3.0);
+        pump(&mut engine, &events, |engine| !engine.preparing);
+        engine.end_scrub();
+        pump(&mut engine, &events, |engine| !engine.preparing);
+        assert!(!engine.paused && !engine.audio.sink.is_paused());
+        assert_eq!(engine.audio.sink.speed(), 1.3);
+        engine.pause();
+        engine.next();
+        pump(&mut engine, &events, prefetch_ready);
+        assert_eq!(engine.audio.sink.speed(), 1.3);
+        engine.seek_to(10.0);
+        pump(&mut engine, &events, |engine| !engine.preparing);
+        assert_eq!(engine.seconds(), 10.0);
+        assert_eq!(engine.audio.sink.speed(), 1.3);
     }
 
     fn prefetch_ready(engine: &Engine) -> bool {

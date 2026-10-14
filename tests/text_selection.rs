@@ -127,21 +127,10 @@ fn pane_height(screen: &str) -> Option<usize> {
     bottom.checked_sub(top).map(|height| height + 1)
 }
 
-fn click_label(master: &mut File, output: &mut Vec<u8>, label: &str, below_panel: bool) {
+fn click_label(master: &mut File, output: &mut Vec<u8>, label: &str) {
     let locate = |bytes: &[u8]| {
         let screen = screen_text(bytes);
-        let minimum = if below_panel {
-            screen
-                .lines()
-                .position(|line| line.contains('╰'))
-                .map_or(usize::MAX, |row| row + 1)
-        } else {
-            0
-        };
         screen.lines().enumerate().find_map(|(row, line)| {
-            if row < minimum {
-                return None;
-            }
             let index = line.find(label)?;
             Some((
                 row,
@@ -274,6 +263,102 @@ fn tui_no_wave_mouse_selection_copies_title_and_ctrl_c_quits_after_clearing_it()
 }
 
 #[test]
+fn tui_artwork_center_hover_and_click_toggle_playback_and_clear_over_text() {
+    let (_fixture, mut master) = spawn_player(&[]);
+    let mut output = Vec::new();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        screen.contains("tone")
+            && screen.contains("Playing")
+            && screen.contains("q Quit")
+            && pane_height(&screen).is_some()
+    });
+    master.write_all(b"\x1b[<35;40;10M").unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        screen_text(bytes).contains("Pause · Space")
+    });
+    master.write_all(b"\x1b[<0;40;10M\x1b[<0;40;10m").unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        screen.contains("Paused") && screen.contains("Play · Space")
+    });
+    master.write_all(b"\x1b[<35;4;3M").unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        !screen_text(bytes).contains("Play · Space")
+    });
+    master
+        .write_all(b"\x1b[<0;4;3M\x1b[<32;7;3M\x1b[<0;7;3m")
+        .unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        screen_text(bytes).contains("Ctrl+C copy")
+    });
+    assert!(screen_text(&output).contains("Paused"));
+    master
+        .write_all(b"\x1b[<35;40;10M\x1b[<0;40;10M\x1b[<0;40;10m")
+        .unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        screen.contains("Playing")
+            && screen.contains("Pause · Space")
+            && !screen.contains("Ctrl+C copy")
+    });
+}
+
+#[test]
+fn tui_seek_drag_scrubs_before_release_and_restores_pause_on_release_and_focus_loss() {
+    let (_fixture, mut master) = spawn_player(&[]);
+    let mut output = Vec::new();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        screen.contains("tone") && screen.contains(" / 1:00") && screen.contains("q Quit")
+    });
+    master.write_all(b" ").unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        screen_text(bytes).contains("Paused")
+    });
+    let row = screen_text(&output)
+        .lines()
+        .position(|line| line.contains(" / 1:00"))
+        .unwrap()
+        + 1;
+    master
+        .write_all(format!("\x1b[<0;20;{row}M").as_bytes())
+        .unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        screen.contains("Paused") && !screen.contains("Scrubbing") && screen.contains("0:13 / 1:00")
+    });
+    master
+        .write_all(format!("\x1b[<32;60;{row}M").as_bytes())
+        .unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        screen.contains("Scrubbing →")
+            && !screen.contains("Paused")
+            && screen.contains("0:46 / 1:00")
+    });
+    master
+        .write_all(format!("\x1b[<0;60;{row}m").as_bytes())
+        .unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        screen.contains("Paused") && !screen.contains("Scrubbing") && screen.contains("0:46 / 1:00")
+    });
+    master
+        .write_all(format!("\x1b[<0;60;{row}M\x1b[<32;20;{row}M").as_bytes())
+        .unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        screen.contains("Scrubbing ←") && screen.contains("0:13 / 1:00")
+    });
+    master.write_all(b"\x1b[O").unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        screen.contains("Paused") && !screen.contains("Scrubbing") && screen.contains("0:13 / 1:00")
+    });
+}
+
+#[test]
 fn tui_dislike_and_undo_update_private_persistent_state() {
     let (fixture, mut master) = spawn_player(&[]);
     let mut output = Vec::new();
@@ -307,19 +392,14 @@ fn tui_dislike_and_undo_update_private_persistent_state() {
         bytes.windows(4).any(|word| word == b"tone")
     });
     restored_terminal.write_all(b" ").unwrap();
-    click_label(
-        &mut restored_terminal,
-        &mut restored_output,
-        "d Dislike",
-        true,
-    );
+    click_label(&mut restored_terminal, &mut restored_output, "d Dislike");
     read_until(&mut restored_terminal, &mut restored_output, |_| {
         fs::read(&path).is_ok_and(|bytes| {
             serde_json::from_slice::<serde_json::Value>(&bytes)
                 .is_ok_and(|value| value.as_array().is_some_and(|entries| entries.len() == 1))
         })
     });
-    click_label(&mut restored_terminal, &mut restored_output, "u Undo", true);
+    click_label(&mut restored_terminal, &mut restored_output, "u Undo");
     read_until(&mut restored_terminal, &mut restored_output, |_| {
         fs::read(&path).is_ok_and(|bytes| {
             serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -352,7 +432,7 @@ fn tui_wave_toggle_restores_visualization_after_no_wave_startup() {
     });
     let expanded = pane_height(&screen_text(&output)).unwrap();
     assert!(expanded > collapsed);
-    click_label(&mut master, &mut output, "v Visual", true);
+    click_label(&mut master, &mut output, "v Visual");
     read_until(&mut master, &mut output, |bytes| {
         let screen = screen_text(bytes);
         !has_wave(&screen)
@@ -366,13 +446,28 @@ fn tui_wave_toggle_restores_visualization_after_no_wave_startup() {
         .position(|line| line.contains("Wave visualization disabled"))
         .unwrap();
     let bottom = screen.lines().position(|line| line.contains('╰')).unwrap();
-    assert_eq!(notice + 1, bottom);
+    let progress = screen
+        .lines()
+        .position(|line| line.contains(" / "))
+        .unwrap();
+    assert!(notice < progress);
+    for label in ["x Stop", "v Visual", "q Quit"] {
+        let row = screen
+            .lines()
+            .position(|line| line.contains(label))
+            .unwrap();
+        assert!(
+            progress < row && row < bottom,
+            "Control outside the artwork panel: {label}"
+        );
+    }
     let line = screen.lines().nth(notice).unwrap();
-    assert!(line.contains("Local FLAC"));
-    assert!(line.trim_end().ends_with("Wave visualization disabled │"));
-    let line = screen.lines().nth(notice - 1).unwrap();
     assert!(line.contains("Paused"));
-    assert!(line.trim_end().ends_with("Volume: 100% +  · Queued: 0 │"));
+    assert!(line.trim_end().ends_with("Wave visualization disabled │"));
+    let line = screen.lines().nth(notice + 1).unwrap();
+    assert!(line.contains("Local FLAC"));
+    assert!(line.contains("Volume: 100% +"));
+    assert!(line.trim_end().ends_with("Speed: 1.00x ]  · Queued: 0 │"));
     assert!(fixture.child.try_wait().unwrap().is_none());
     assert!(!screen_text(&output).contains("Starting"));
 }
@@ -386,11 +481,11 @@ fn tui_inline_volume_buttons_work_without_a_slider_and_seek_hint_follows_stop() 
         screen.contains("tone") && screen.contains("Volume: 100%")
     });
     master.write_all(b" ").unwrap();
-    click_label(&mut master, &mut output, "- Volume", false);
+    click_label(&mut master, &mut output, "- Volume");
     read_until(&mut master, &mut output, |bytes| {
         screen_text(bytes).contains("Volume: 95%")
     });
-    click_label(&mut master, &mut output, "+  · Queued", false);
+    click_label(&mut master, &mut output, "+  ·");
     read_until(&mut master, &mut output, |bytes| {
         screen_text(bytes).contains("Volume: 100%")
     });
@@ -398,6 +493,52 @@ fn tui_inline_volume_buttons_work_without_a_slider_and_seek_hint_follows_stop() 
     assert_eq!(screen.matches("Volume").count(), 1);
     let line = screen.lines().find(|line| line.contains("x Stop")).unwrap();
     assert!(line.find("←/→ Seek").unwrap() > line.find("x Stop").unwrap());
+}
+
+#[test]
+fn tui_inline_speed_buttons_hotkeys_and_wheel_keep_the_rate_within_bounds() {
+    let (_fixture, mut master) = spawn_player(&["--no-wave"]);
+    let mut output = Vec::new();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        screen.contains("tone") && screen.contains("Speed: 1.00x")
+    });
+    master.write_all(b" ").unwrap();
+    click_label(&mut master, &mut output, "[ Speed");
+    read_until(&mut master, &mut output, |bytes| {
+        screen_text(bytes).contains("Speed: 0.95x")
+    });
+    click_label(&mut master, &mut output, "]  · Queued");
+    read_until(&mut master, &mut output, |bytes| {
+        screen_text(bytes).contains("Speed: 1.00x")
+    });
+    master.write_all(b"[[[[[[[[[[[[[[[[[[[[").unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        screen_text(bytes).contains("Speed: 0.10x")
+    });
+    master
+        .write_all(b"]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]")
+        .unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        screen_text(bytes).contains("Speed: 2.00x")
+    });
+    click_label(&mut master, &mut output, "Speed:");
+    let screen = screen_text(&output);
+    let (row, line) = screen
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("Speed:"))
+        .unwrap();
+    let column = unicode_width::UnicodeWidthStr::width(&line[..line.find("Speed:").unwrap()]) + 1;
+    master
+        .write_all(format!("\x1b[<65;{column};{}M", row + 1).as_bytes())
+        .unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        screen.contains("Speed: 1.95x")
+            && screen.contains("Volume: 100%")
+            && screen.contains("Paused")
+    });
 }
 
 #[test]

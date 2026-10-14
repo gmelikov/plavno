@@ -171,10 +171,11 @@ impl Audio {
         Ok(Self { stream, sink })
     }
 
-    pub fn play(&mut self, source: PcmSource, paused: bool, volume: f32) {
+    pub fn play(&mut self, source: PcmSource, paused: bool, volume: f32, speed: f32) {
         self.sink.stop();
         self.sink = Sink::connect_new(self.stream.mixer());
         self.sink.set_volume(volume);
+        self.sink.set_speed(speed);
         if paused {
             self.sink.pause();
         }
@@ -909,6 +910,24 @@ pub fn prepare_at(
     cancelled: Arc<AtomicBool>,
     position: f64,
 ) -> Result<Prepared> {
+    prepare_segment(buffer, cancelled, position, None)
+}
+
+pub fn prepare_scrub_at(
+    buffer: Arc<CachedAudio>,
+    cancelled: Arc<AtomicBool>,
+    position: f64,
+    reverse: bool,
+) -> Result<Prepared> {
+    prepare_segment(buffer, cancelled, position, Some(reverse))
+}
+
+fn prepare_segment(
+    buffer: Arc<CachedAudio>,
+    cancelled: Arc<AtomicBool>,
+    position: f64,
+    scrub: Option<bool>,
+) -> Result<Prepared> {
     anyhow::ensure!(!cancelled.load(Ordering::Relaxed), "Loading cancelled");
     let position = Duration::try_from_secs_f64(position).context("Invalid audio position")?;
     let progress = Arc::new(Progress::default());
@@ -939,19 +958,52 @@ pub fn prepare_at(
     let sample_rate = decoder.sample_rate();
     let duration = decoder.total_duration().map(|d| d.as_secs_f64());
     let position = duration.map_or(position, |d| position.min(Duration::from_secs_f64(d)));
-    let at_end = duration.is_some_and(|duration| position.as_secs_f64() >= duration);
-    if !position.is_zero() && !at_end {
+    let grain = Duration::from_millis(400);
+    let start = if scrub == Some(true) {
+        position.saturating_sub(grain)
+    } else {
+        position
+    };
+    let at_end = duration.is_some_and(|duration| start.as_secs_f64() >= duration);
+    if !start.is_zero() && !at_end {
         decoder
-            .try_seek(position)
+            .try_seek(start)
             .map_err(|error| anyhow::anyhow!("Failed to seek the audio stream: {error}"))?;
     }
-    let first: Vec<f32> = if at_end {
+    let samples = scrub.map_or(BLOCK_SAMPLES, |reverse| {
+        let length = if reverse { position - start } else { grain };
+        (length.as_secs_f64() * f64::from(sample_rate)).round() as usize * usize::from(channels)
+    });
+    let mut first: Vec<f32> = if at_end {
         Vec::new()
     } else {
-        decoder.by_ref().take(BLOCK_SAMPLES).collect()
+        decoder.by_ref().take(samples).collect()
     };
+    if let Some(reverse) = scrub {
+        let channels = usize::from(channels);
+        first.truncate(first.len() / channels * channels);
+        if reverse {
+            let frames = first.len() / channels;
+            for frame in 0..frames / 2 {
+                for channel in 0..channels {
+                    first.swap(
+                        frame * channels + channel,
+                        (frames - frame - 1) * channels + channel,
+                    );
+                }
+            }
+        }
+        let frames = first.len() / channels;
+        let fade = (sample_rate as usize / 500).max(1);
+        for (frame, samples) in first.chunks_exact_mut(channels).enumerate() {
+            let gain = frame.min(frames - frame - 1).min(fade) as f32 / fade as f32;
+            for sample in samples {
+                *sample *= gain;
+            }
+        }
+    }
     anyhow::ensure!(
-        !first.is_empty() || !position.is_zero(),
+        !first.is_empty() || !position.is_zero() || scrub.is_some(),
         "The audio stream is empty"
     );
     cache.start_download()?;
@@ -959,7 +1011,7 @@ pub fn prepare_at(
     let first = meter.block(first);
     let batch_samples = pcm_batch_samples(channels, sample_rate);
     let (sender, receiver) = mpsc::sync_channel(BUFFER_BLOCKS);
-    if !first.samples.is_empty() {
+    if !first.samples.is_empty() && scrub.is_none() {
         std::thread::Builder::new()
             .name("decode".into())
             .spawn(move || {
@@ -994,6 +1046,40 @@ pub fn prepare_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrub_grains_are_bounded_reverse_the_pcm_and_fade_their_edges() {
+        let buffer = cache_input(Input::File(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tone.flac"),
+        ))
+        .unwrap();
+        let forward =
+            prepare_scrub_at(buffer.clone(), Arc::new(AtomicBool::new(false)), 9.6, false).unwrap();
+        let channels = usize::from(forward.source.channels());
+        let rate = forward.source.sample_rate();
+        let forward: Vec<_> = forward.source.collect();
+        let reverse =
+            prepare_scrub_at(buffer.clone(), Arc::new(AtomicBool::new(false)), 10.0, true).unwrap();
+        let reverse: Vec<_> = reverse.source.collect();
+        assert_eq!(
+            forward.len(),
+            (f64::from(rate) * 0.4).round() as usize * channels
+        );
+        assert_eq!(reverse.len(), forward.len());
+        for (actual, expected) in reverse
+            .chunks_exact(channels)
+            .zip(forward.chunks_exact(channels).rev())
+        {
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(reverse[0], 0.0);
+        assert_eq!(*reverse.last().unwrap(), 0.0);
+        let start =
+            prepare_scrub_at(buffer.clone(), Arc::new(AtomicBool::new(false)), 0.0, true).unwrap();
+        assert_eq!(start.source.count(), 0);
+        let end = prepare_scrub_at(buffer, Arc::new(AtomicBool::new(false)), 60.0, false).unwrap();
+        assert_eq!(end.source.count(), 0);
+    }
 
     fn prepare(input: Input, cancelled: Arc<AtomicBool>) -> Result<Prepared> {
         super::prepare(cache_input(input)?, cancelled)
