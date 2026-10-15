@@ -60,7 +60,7 @@ pub struct Image {
     pub area: Rect,
     pub width: usize,
     pub height: usize,
-    pub palette: [[u8; 3]; 8],
+    pub palette: Vec<[u8; 3]>,
     // Color zero is transparent, not a painted background.
     pub pixels: Vec<u8>,
 }
@@ -112,7 +112,7 @@ impl Image {
             area,
             width,
             height,
-            palette: self.palette,
+            palette: self.palette.clone(),
             pixels,
         })
     }
@@ -150,9 +150,10 @@ impl Image {
         }
         let colors = self.palette.len() - 1;
         let mut planes = vec![0_u8; self.width * colors];
+        let mut ends = vec![0; colors];
         for band in (0..self.height).step_by(6) {
             planes.fill(0);
-            let mut ends = [0; 7];
+            ends.fill(0);
             // Read each pixel once to build all palette planes for this band.
             for y in band..(band + 6).min(self.height) {
                 let bit = 1 << (y - band);
@@ -427,7 +428,7 @@ mod tests {
                         .map(|value| value.parse().unwrap())
                         .collect();
                     let (width, height) = (dimensions[2], dimensions[3]);
-                    let mut palette = [[0; 3]; 8];
+                    let mut palette = [[0; 3]; 256];
                     let colors = regex_lite::Regex::new(r"#(\d+);2;(\d+);(\d+);(\d+)").unwrap();
                     for color in colors.captures_iter(encoded) {
                         palette[color[1].parse::<usize>().unwrap()] =
@@ -477,13 +478,15 @@ mod tests {
             area,
             width,
             height,
-            palette: std::array::from_fn(|index| {
-                [
-                    if index & 1 != 0 { 255 } else { 0 },
-                    if index & 2 != 0 { 255 } else { 0 },
-                    if index & 4 != 0 { 255 } else { 0 },
-                ]
-            }),
+            palette: (0..8)
+                .map(|index| {
+                    [
+                        if index & 1 != 0 { 255 } else { 0 },
+                        if index & 2 != 0 { 255 } else { 0 },
+                        if index & 4 != 0 { 255 } else { 0 },
+                    ]
+                })
+                .collect(),
             pixels: (0..width * height)
                 .map(|index| ((index + phase) % 8) as u8)
                 .collect(),
@@ -511,6 +514,14 @@ mod tests {
             let mut image = (!matches!(frame, 8 | 9 | 17)).then(|| {
                 let mut image =
                     fixture_image(Rect::new(2 + (frame / 6) as u16, 1, 6, 4), cell, frame / 2);
+                if frame >= 10 {
+                    image.palette.extend((8..28).map(|i| [i * 8, 100, 210]));
+                    for color in &mut image.pixels {
+                        if *color != 0 {
+                            *color += 20;
+                        }
+                    }
+                }
                 if frame % 4 == 0 {
                     image.palette.swap(1, 2);
                 }
@@ -740,9 +751,9 @@ mod tests {
 
     #[test]
     fn sixel_round_trips_colors_transparency_partial_bands_and_long_runs() {
-        for (width, height) in [(1, 1), (13, 11), (300, 18)] {
+        for (width, height, colors) in [(1, 1, 8), (13, 11, 28), (300, 18, 28)] {
             let mut pixels: Vec<_> = (0..width * height)
-                .map(|index| ((index * 7 + index / 3) % 8) as u8)
+                .map(|index| ((index * 7 + index / 3) % colors) as u8)
                 .collect();
             if height >= 18 {
                 pixels[width * 6..width * 12].fill(0);
@@ -752,7 +763,7 @@ mod tests {
                 area: Rect::default(),
                 width,
                 height,
-                palette: [[90, 160, 240]; 8],
+                palette: vec![[90, 160, 240]; colors],
                 pixels,
             };
             let encoded = image.encode();
@@ -770,7 +781,7 @@ mod tests {
             area: Rect::new(0, 0, 3, 2),
             width: 12,
             height: 12,
-            palette: [[0; 3]; 8],
+            palette: vec![[0; 3]; 8],
             pixels: (0..144).map(|index| (index % 8) as u8).collect(),
         };
         let original = image.pixels.clone();
@@ -796,7 +807,7 @@ mod tests {
             area: Rect::new(1, 0, 3, 2),
             width: 12,
             height: 12,
-            palette: [[0; 3]; 8],
+            palette: vec![[0; 3]; 8],
             pixels: vec![3; 144],
         };
         let mut buffer = Buffer::empty(Rect::new(0, 0, 5, 2));

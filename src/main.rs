@@ -48,7 +48,7 @@ fn run() -> Result<()> {
         .is_some_and(|arg| arg == "--help" || arg == "-h")
     {
         println!(
-            "plavno — a lightweight music TUI\n\n  plavno                        play the first connected service\n  plavno --source SOURCE        yandex / soundcloud / spotify / vk / ytmusic / mixed\n  plavno --favorites            shuffle favorites (default: Yandex; --source vk: My Music)\n  plavno --no-wave              start with visualization hidden\n  plavno --dance                show the wave and dancing silhouette\n  plavno --dance-style STYLE    auto / flow / groove / pulse / house / hiphop / rave\n  plavno --renderer MODE        dancer output: auto / braille / sixel\n  plavno --sixel-update MODE    diff (default) / full\n  plavno login [SOURCE]         connect a service (default: yandex; SoundCloud/VK: browser)\n  plavno login yandex           paste a Yandex Music OAuth token\n  plavno login SOURCE --manual  paste a JSON profile without browser automation\n  plavno diagnose yandex       check API access and audio CDN connectivity\n  plavno diagnose vk           inspect the VK response layout (no session values)\n  plavno sources                list service configuration\n  plavno --file FILE            play a local file\n\nSpace pause · x stop · p/n tracks · ←/→ ±5s · Shift+←/→ ±30s\nClick controls · drag progress · scroll bar to seek, Speed to change rate, elsewhere volume · h or / history\nHistory: type to search · ↑/↓ select · Enter play · Esc back\ns sources · m Wave Shuffle · w restart wave · f Favorites Shuffle\ng Flow settings · v toggle visualization · b wave/dance · l ♥/♡ favorites · d dislike · u undo dislike\n+/- volume · [/] playback speed · q quit"
+            "plavno — a lightweight music TUI\n\n  plavno                        play the first connected service\n  plavno --source SOURCE        yandex / soundcloud / spotify / vk / ytmusic / mixed\n  plavno --favorites            shuffle favorites (default: Yandex; --source vk: My Music)\n  plavno --no-wave              start with visualization hidden\n  plavno --dance                show the wave and dancing silhouette\n  plavno --dance-style STYLE    auto / flow / groove / pulse / house / hiphop / rave\n  plavno --renderer MODE        dancer output: auto / braille / sixel\n  plavno --dance-skin SKIN       sixel appearance: detailed (default) / silhouette\n  plavno --sixel-update MODE    diff (default) / full\n  plavno login [SOURCE]         connect a service (default: yandex; SoundCloud/VK: browser)\n  plavno login yandex           paste a Yandex Music OAuth token\n  plavno login SOURCE --manual  paste a JSON profile without browser automation\n  plavno diagnose yandex       check API access and audio CDN connectivity\n  plavno diagnose vk           inspect the VK response layout (no session values)\n  plavno sources                list service configuration\n  plavno --file FILE            play a local file\n\nSpace pause · x stop · p/n tracks · ←/→ ±5s · Shift+←/→ ±30s\nClick controls · drag progress · scroll bar to seek, Speed to change rate, elsewhere volume · h or / history\nHistory: type to search · ↑/↓ select · Enter play · Esc back\ns sources · m Wave Shuffle · w restart wave · f Favorites Shuffle\ng Flow settings · v toggle visualization · b wave/dance · l ♥/♡ favorites · d dislike · u undo dislike\n+/- volume · [/] playback speed · q quit"
         );
         return Ok(());
     }
@@ -96,6 +96,7 @@ fn run() -> Result<()> {
     let mut dance_style = dance_motion::Style::Auto;
     let mut renderer = visualization::Renderer::Braille;
     let mut sixel_update = sixel::UpdateMode::default();
+    let mut skin = dancer::skin::Skin::default();
     let mut selected = None;
     let mut file = None;
     let mut arguments = args.iter();
@@ -122,6 +123,12 @@ fn run() -> Result<()> {
                 Some("auto" | "braille") => visualization::Renderer::Braille,
                 Some("sixel") => visualization::Renderer::Sixel,
                 _ => bail!("--renderer requires auto, braille, or sixel"),
+            };
+        } else if arg == "--dance-skin" {
+            skin = match arguments.next().and_then(|arg| arg.to_str()) {
+                Some("detailed") => dancer::skin::Skin::Detailed,
+                Some("silhouette") => dancer::skin::Skin::Silhouette,
+                _ => bail!("--dance-skin requires detailed or silhouette"),
             };
         } else if arg == "--sixel-update" {
             sixel_update = match arguments.next().and_then(|arg| arg.to_str()) {
@@ -184,6 +191,7 @@ fn run() -> Result<()> {
             style: dance_style,
             renderer,
             sixel_update,
+            skin,
         },
     )
 }

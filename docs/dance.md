@@ -14,6 +14,14 @@ The sixel path shares the spatial rig and surface renderer, with independent
 pixel colors instead of one foreground color per Braille cell. It uses the
 terminal's reported cell pixel dimensions and crops to the figure and its trail.
 The wave and controls remain terminal text, and text takes priority over graphics.
+Sixel uses the detailed skin by default: a violet jacket, dark trousers, cyan
+sneakers and headphones, brown hair, and a ponytail. Its 28-color palette adds
+surface shading, eyes, cuffs, shoe soles, and clothing seams to the same 3D rig.
+Clothing and accessories turn with the body and share its depth buffer.
+Compare the previous appearance with `--dance-skin silhouette`; use
+`--dance-skin detailed` to select the skin explicitly. Braille keeps its silhouette.
+The original [pose sheet](images/dancer-poses.webp) is preserved as a visual reference.
+
 Transparent sixels preserve the artwork. `--sixel-update diff` (default) compares
 pixels, palette colors, and underlying text, then restores text and redraws sixel
 only inside the bounding rectangle of changed cells. Identical frames send no

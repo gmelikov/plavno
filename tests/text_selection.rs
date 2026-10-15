@@ -509,7 +509,11 @@ fn tui_dancer_switches_with_mouse_remembers_its_mode_and_preserves_track_control
 
 #[test]
 fn tui_sixel_update_modes_preserve_menus_controls_and_resize() {
-    for update in ["full", "diff"] {
+    for (update, skin) in [
+        ("full", "detailed"),
+        ("diff", "detailed"),
+        ("diff", "silhouette"),
+    ] {
         let (_fixture, mut master) = spawn_player(&[
             "--dance-style",
             "flow",
@@ -517,6 +521,8 @@ fn tui_sixel_update_modes_preserve_menus_controls_and_resize() {
             "sixel",
             "--sixel-update",
             update,
+            "--dance-skin",
+            skin,
         ]);
         let mut output = Vec::new();
         let sixel = b"\x1bP7;1;0q";

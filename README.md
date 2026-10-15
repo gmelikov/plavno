@@ -150,6 +150,8 @@ remain available as basic movement profiles.
 pixels in foot: `plavno --dance-style flow --renderer sixel`. The wave stays in
 Braille; sixel draws the dancer over it. Run directly in the terminal if a
 multiplexer hides its pixel dimensions.
+Sixel uses a detailed violet-jacket skin; `--dance-skin silhouette` selects the
+previous look. See [dance rendering](docs/dance.md) for the original pose sheet.
 Sixel defaults to `--sixel-update diff`, restoring and redrawing only the changed
 region. Use `--sixel-update full` to clear and repaint each frame instead.
 

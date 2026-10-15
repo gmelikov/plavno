@@ -412,6 +412,7 @@ fn chain(start: Vec3, target: Vec3, pole: Vec3, upper: f32, lower: f32) -> (Vec3
     )
 }
 
+#[derive(Clone, Copy)]
 pub struct Capsule {
     pub start: Vec3,
     pub end: Vec3,
@@ -419,7 +420,7 @@ pub struct Capsule {
 }
 
 impl Capsule {
-    fn new(start: Vec3, end: Vec3, radii: [f32; 2]) -> Self {
+    pub fn new(start: Vec3, end: Vec3, radii: [f32; 2]) -> Self {
         Self { start, end, radii }
     }
 

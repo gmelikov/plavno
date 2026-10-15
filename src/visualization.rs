@@ -21,6 +21,7 @@ pub struct Options {
     pub style: Style,
     pub renderer: Renderer,
     pub sixel_update: crate::sixel::UpdateMode,
+    pub skin: crate::dancer::skin::Skin,
 }
 
 impl Mode {
@@ -44,6 +45,7 @@ pub struct Visualization {
     pub renderer: Renderer,
     wave: Wave,
     dancer: Dancer,
+    skin: crate::dancer::skin::Skin,
 }
 
 impl Visualization {
@@ -53,6 +55,7 @@ impl Visualization {
             renderer: options.renderer,
             wave: Wave::default(),
             dancer: Dancer::new(options.style),
+            skin: options.skin,
         }
     }
 
@@ -80,7 +83,7 @@ impl Visualization {
         cell: crate::sixel::CellSize,
         buffer: &Buffer,
     ) -> Option<crate::sixel::Image> {
-        let mut image = self.dancer.sixel(area, cell)?;
+        let mut image = self.dancer.sixel(area, cell, self.skin)?;
         image.protect_text(buffer, cell);
         Some(image)
     }

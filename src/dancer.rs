@@ -7,6 +7,9 @@ use crate::{
 use ratatui::{buffer::Buffer, layout::Rect, style::Color, widgets::Widget};
 use std::{collections::VecDeque, time::Instant};
 
+#[path = "dancer_skin.rs"]
+pub mod skin;
+
 pub struct Dancer {
     motion: Motion,
     energy: f32,
@@ -246,7 +249,12 @@ impl Dancer {
         ]
     }
 
-    pub fn sixel(&self, area: Rect, cell: crate::sixel::CellSize) -> Option<crate::sixel::Image> {
+    pub fn sixel(
+        &self,
+        area: Rect,
+        cell: crate::sixel::CellSize,
+        skin: skin::Skin,
+    ) -> Option<crate::sixel::Image> {
         if area.width < 4 || area.height < 2 {
             return None;
         }
@@ -305,7 +313,14 @@ impl Dancer {
             -f32::from(x0) * f32::from(cell.width),
             -f32::from(y0) * f32::from(cell.height),
         );
-        let surface = Surface::render(&self.motion.spatial.pose, width, height, origin, scale);
+        let surface = match skin {
+            skin::Skin::Detailed => {
+                skin::render(&self.motion.spatial.pose, width, height, origin, scale)
+            }
+            skin::Skin::Silhouette => {
+                Surface::render(&self.motion.spatial.pose, width, height, origin, scale)
+            }
+        };
         let mut pixels = vec![0; width * height];
         let trails = [8, 4].map(|age| {
             let mut trail = Dots::new(width, height);
@@ -328,7 +343,9 @@ impl Dancer {
                     };
                     continue;
                 }
-                pixels[y * width + x] = if sample.tint >= 0.0 {
+                pixels[y * width + x] = if skin == skin::Skin::Detailed {
+                    skin::color(&surface, x, y)
+                } else if sample.tint >= 0.0 {
                     if sample.tint > 0.5 { 6 } else { 7 }
                 } else if x < edge
                     || y < edge
@@ -341,7 +358,15 @@ impl Dancer {
                 };
             }
         }
-        for (index, point) in self.motion.spatial.pose.face().into_iter().enumerate() {
+        for (index, point) in self
+            .motion
+            .spatial
+            .pose
+            .face()
+            .into_iter()
+            .enumerate()
+            .filter(|_| skin == skin::Skin::Silhouette)
+        {
             let screen = origin.offset(point.x * scale, point.y * scale);
             let (x, y) = (screen.x.floor() as usize, screen.y.floor() as usize);
             if screen.x < 0.0 || screen.y < 0.0 || x >= width || y >= height {
@@ -356,10 +381,16 @@ impl Dancer {
                 pixels[y * width + x] = if index < 2 { 0 } else { 5 };
             }
         }
-        let mut palette = [[0; 3]; 8];
-        for (entry, color) in palette.iter_mut().skip(1).zip(self.colors()) {
-            if let Color::Rgb(r, g, b) = color {
-                *entry = [r, g, b];
+        let mut palette = if skin == skin::Skin::Detailed {
+            skin::palette()
+        } else {
+            vec![[0; 3]; 8]
+        };
+        if skin == skin::Skin::Silhouette {
+            for (entry, color) in palette.iter_mut().skip(1).zip(self.colors()) {
+                if let Color::Rgb(r, g, b) = color {
+                    *entry = [r, g, b];
+                }
             }
         }
         Some(crate::sixel::Image {
@@ -404,6 +435,7 @@ impl Dancer {
 struct SurfaceDot {
     depth: f32,
     tint: f32,
+    material: u8,
 }
 
 struct Surface {
@@ -413,16 +445,17 @@ struct Surface {
     origin: Point,
     scale: f32,
     chest_depth: f32,
+    material: u8,
 }
 
 impl Surface {
-    fn render(pose: &Skeleton, width: usize, height: usize, origin: Point, scale: f32) -> Self {
-        let chest = pose.shoulders[0].lerp(pose.shoulders[1], 0.5);
-        let mut surface = Self {
+    fn new(width: usize, height: usize, origin: Point, scale: f32) -> Self {
+        Self {
             dots: vec![
                 SurfaceDot {
                     depth: f32::NEG_INFINITY,
-                    tint: -1.0
+                    tint: -1.0,
+                    material: 0,
                 };
                 width * height
             ],
@@ -430,8 +463,14 @@ impl Surface {
             height,
             origin,
             scale,
-            chest_depth: chest.z,
-        };
+            chest_depth: 0.0,
+            material: 0,
+        }
+    }
+
+    fn render(pose: &Skeleton, width: usize, height: usize, origin: Point, scale: f32) -> Self {
+        let mut surface = Self::new(width, height, origin, scale);
+        surface.chest_depth = pose.shoulders[0].lerp(pose.shoulders[1], 0.5).z;
         for part in pose.body_parts() {
             surface.capsule(part.start, part.end, part.radii, false);
         }
@@ -542,7 +581,11 @@ impl Surface {
     fn write(&mut self, x: usize, y: usize, depth: f32, tint: f32) {
         let dot = &mut self.dots[y * self.width + x];
         if depth > dot.depth {
-            *dot = SurfaceDot { depth, tint };
+            *dot = SurfaceDot {
+                depth,
+                tint,
+                material: self.material,
+            };
         }
     }
 
@@ -755,6 +798,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn detailed_skin_colors_the_spatial_pose_without_changing_motion_or_crop() {
+        let mut dancer = Dancer::new(Style::Flow);
+        let cell = crate::sixel::CellSize {
+            width: 8,
+            height: 16,
+        };
+        let area = Rect::new(0, 0, 120, 40);
+        let mut preview = image::RgbImage::from_pixel(720, 240, image::Rgb([8, 12, 20]));
+        for frame in 0..4 {
+            for _ in 0..45 {
+                dancer.step(
+                    Levels {
+                        rms: 0.2,
+                        bass: 0.15,
+                        ..Levels::default()
+                    },
+                    1.0 / 30.0,
+                    true,
+                );
+            }
+            let pose = dancer.motion.spatial.pose;
+            let detailed = dancer.sixel(area, cell, skin::Skin::Detailed).unwrap();
+            let silhouette = dancer.sixel(area, cell, skin::Skin::Silhouette).unwrap();
+            assert_eq!(detailed.area, silhouette.area);
+            assert_eq!(dancer.motion.spatial.pose, pose);
+            assert!(
+                detailed
+                    .pixels
+                    .iter()
+                    .all(|&color| usize::from(color) < detailed.palette.len())
+            );
+            for range in [4..7, 7..10, 10..13, 13..16, 16..19] {
+                assert!(
+                    detailed.pixels.iter().any(|color| range.contains(color)),
+                    "Missing skin material {range:?}"
+                );
+            }
+            for y in 0..detailed.height.min(240) {
+                for x in 0..detailed.width.min(180) {
+                    let index = detailed.pixels[y * detailed.width + x];
+                    if index != 0 {
+                        preview.put_pixel(
+                            (frame * 180 + x) as u32,
+                            y as u32,
+                            image::Rgb(detailed.palette[usize::from(index)]),
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(path) = std::env::var_os("PLAVNO_SKIN_PREVIEW") {
+            preview.save(path).unwrap();
+        }
+    }
+
+    #[test]
     fn native_pixels_crop_to_the_dancer_and_preserve_the_terminal_stage() {
         let mut dancer = Dancer::new(Style::Flow);
         for _ in 0..180 {
@@ -773,7 +872,7 @@ mod tests {
             width: 8,
             height: 16,
         };
-        let image = dancer.sixel(area, cell).unwrap();
+        let image = dancer.sixel(area, cell, skin::Skin::Silhouette).unwrap();
         assert_eq!(image.area.intersection(area), image.area);
         assert!(image.area.y >= area.bottom() - 13);
         assert!(image.area.width < area.width);
@@ -784,7 +883,11 @@ mod tests {
             image.pixels.contains(&0) && image.pixels.contains(&3) && image.pixels.contains(&6)
         );
         assert!(image.pixels.iter().all(|color| *color < 8));
-        assert!(dancer.sixel(Rect::new(0, 0, 1, 1), cell).is_none());
+        assert!(
+            dancer
+                .sixel(Rect::new(0, 0, 1, 1), cell, skin::Skin::Silhouette)
+                .is_none()
+        );
         if let Some(path) = std::env::var_os("PLAVNO_SIXEL_PREVIEW") {
             let path = std::path::Path::new(&path);
             let png = image::RgbaImage::from_fn(image.width as u32, image.height as u32, |x, y| {
@@ -802,7 +905,8 @@ mod tests {
             dots: vec![
                 SurfaceDot {
                     depth: f32::NEG_INFINITY,
-                    tint: -1.0
+                    tint: -1.0,
+                    material: 0,
                 };
                 64
             ],
@@ -811,6 +915,7 @@ mod tests {
             origin: Point::new(4.5, 4.5),
             scale: 30.0,
             chest_depth: 0.0,
+            material: 0,
         }
     }
 
