@@ -84,11 +84,20 @@ use std::os::unix::fs::DirBuilderExt;
 
 fn pipe() -> Result<(OwnedFd, OwnedFd)> {
     let mut fds = [-1; 2];
-    ensure!(
-        unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0,
-        "Cannot create browser connection"
-    );
-    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+    #[cfg(target_os = "linux")]
+    let result = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    let result = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    ensure!(result == 0, "Cannot create browser connection");
+    let pair = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    #[cfg(not(target_os = "linux"))]
+    for fd in [&pair.0, &pair.1] {
+        ensure!(
+            unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == 0,
+            "Cannot protect browser connection descriptors"
+        );
+    }
+    Ok(pair)
 }
 
 fn browser_program() -> Result<PathBuf> {
@@ -103,6 +112,26 @@ fn browser_program() -> Result<PathBuf> {
     ] {
         for directory in env::split_paths(&env::var_os("PATH").unwrap_or_default()) {
             let path = directory.join(name);
+            if fs::metadata(&path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            {
+                return Ok(path);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    for base in [
+        Some(PathBuf::from("/Applications")),
+        env::var_os("HOME").map(|home| PathBuf::from(home).join("Applications")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for executable in [
+            "Google Chrome.app/Contents/MacOS/Google Chrome",
+            "Chromium.app/Contents/MacOS/Chromium",
+            "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        ] {
+            let path = base.join(executable);
             if fs::metadata(&path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
             {
                 return Ok(path);
@@ -557,6 +586,7 @@ fn vk_account(cookies: &web::Cookies, page: &Value) -> Option<(i64, String)> {
 }
 
 fn connect(source: Source, existing: &Value) -> Result<(Value, String)> {
+    #[cfg(target_os = "linux")]
     ensure!(
         env::var_os("DISPLAY").is_some() || env::var_os("WAYLAND_DISPLAY").is_some(),
         "Browser login needs a graphical session; run it from your desktop terminal"
@@ -713,6 +743,21 @@ pub fn login(source: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_pipe_is_closed_on_exec_and_transports_bytes() {
+        let (read, write) = pipe().unwrap();
+        for fd in [&read, &write] {
+            let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+            assert!(flags >= 0);
+            assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        }
+        let mut read = fs::File::from(read);
+        fs::File::from(write).write_all(b"fixture").unwrap();
+        let mut bytes = Vec::new();
+        read.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"fixture");
+    }
 
     #[test]
     fn vk_browser_tokens_are_captured_only_from_trusted_https_api_requests() {

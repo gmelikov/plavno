@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", all(target_os = "macos", feature = "test-audio")))]
 
 use std::{
     fs::{self, File},
@@ -136,9 +136,16 @@ fn pane_height(screen: &str) -> Option<usize> {
 
 fn label_position(bytes: &[u8], label: &str) -> Option<(usize, usize)> {
     let screen = screen_text(bytes);
+    // A notification can mention Undo before its button has been repainted.
+    let first_row = if label == "u Undo" {
+        screen.lines().position(|line| line.contains("q Quit"))?
+    } else {
+        0
+    };
     screen
         .lines()
         .enumerate()
+        .filter(|(row, _)| *row >= first_row)
         .filter_map(|(row, line)| {
             let index = line.find(label)?;
             Some((
@@ -153,6 +160,12 @@ fn label_position(bytes: &[u8], label: &str) -> Option<(usize, usize)> {
 fn mouse_target_prefers_the_control_below_a_notification_with_the_same_label() {
     let output = b"\x1b[16;1HDisliked: tone.flac - u Undo\x1b[22;1H q Quit   u Undo ";
     assert_eq!(label_position(output, "u Undo"), Some((21, 11)));
+}
+
+#[test]
+fn mouse_target_waits_for_the_control_when_a_notification_is_repainted_first() {
+    let output = b"\x1b[16;1HDisliked: tone.flac - u Undo\x1b[22;1H q Quit ";
+    assert_eq!(label_position(output, "u Undo"), None);
 }
 
 fn click_label(master: &mut File, output: &mut Vec<u8>, label: &str) {
@@ -178,7 +191,9 @@ fn spawn_player_with_state(args: &[&str], state: Option<&Path>) -> (Fixture, Fil
         NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
     fs::create_dir(&root).unwrap();
+    #[cfg(target_os = "linux")]
     let alsa = root.join("alsa.conf");
+    #[cfg(target_os = "linux")]
     fs::write(&alsa, "pcm.!default { type null }\n").unwrap();
     let mut master_fd = -1;
     let mut slave_fd = -1;
@@ -187,7 +202,7 @@ fn spawn_player_with_state(args: &[&str], state: Option<&Path>) -> (Fixture, Fil
     } else {
         24
     };
-    let size = libc::winsize {
+    let mut size = libc::winsize {
         ws_row: rows,
         ws_col: 80,
         ws_xpixel: if args.contains(&"sixel") { 640 } else { 0 },
@@ -203,8 +218,8 @@ fn spawn_player_with_state(args: &[&str], state: Option<&Path>) -> (Fixture, Fil
                 &mut master_fd,
                 &mut slave_fd,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                &size,
+                std::ptr::null_mut(),
+                &raw mut size,
             )
         },
         0
@@ -222,15 +237,18 @@ fn spawn_player_with_state(args: &[&str], state: Option<&Path>) -> (Fixture, Fil
         .args(args)
         .env("XDG_CONFIG_HOME", &root)
         .env("XDG_STATE_HOME", state.unwrap_or(root.as_path()))
-        .env("ALSA_CONFIG_PATH", &alsa)
         .env("TERM", "xterm-256color")
         .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .stdin(Stdio::from(slave.try_clone().unwrap()))
         .stdout(Stdio::from(slave.try_clone().unwrap()))
         .stderr(Stdio::from(slave));
+    #[cfg(target_os = "linux")]
+    command.env("ALSA_CONFIG_PATH", &alsa);
+    #[cfg(feature = "test-audio")]
+    command.env("PLAVNO_TEST_AUDIO", "1");
     unsafe {
         command.pre_exec(|| {
-            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())

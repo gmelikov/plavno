@@ -134,6 +134,7 @@ fn queued_request_after_change(next: Option<&str>, cached: bool) -> Option<Strin
                     Err(error) => panic!("Fixture accept failed: {error}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             started.send(read_path(&mut stream)).unwrap();
             if index == 0 {
                 released.recv_timeout(Duration::from_secs(3)).unwrap();

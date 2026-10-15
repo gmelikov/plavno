@@ -21,6 +21,7 @@ pub const MAX_SPEED: f64 = 2.0;
 
 pub enum Event {
     Terminal(TerminalEvent),
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Control(Command),
     InputError,
     Batch(u64, Result<Vec<Track>>),
@@ -33,6 +34,7 @@ pub enum Event {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub enum Command {
     Play,
     Pause,
@@ -1562,24 +1564,6 @@ mod tests {
 
     #[test]
     fn local_shuffle_repeats_through_the_engine_and_keeps_cached_audio() {
-        if std::env::var_os("PLAVNO_LOCAL_TEST_CHILD").is_none() {
-            let config =
-                std::env::temp_dir().join(format!("plavno-local-alsa-{}.conf", std::process::id()));
-            std::fs::write(&config, "pcm.!default { type null }\n").unwrap();
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "engine::tests::local_shuffle_repeats_through_the_engine_and_keeps_cached_audio", "--nocapture"])
-                .env("PLAVNO_LOCAL_TEST_CHILD", "1")
-                .env("ALSA_CONFIG_PATH", &config)
-                .output().unwrap();
-            std::fs::remove_file(config).unwrap();
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
         let root = std::env::temp_dir().join(format!("plavno-local-engine-{}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         std::fs::copy(
@@ -1839,25 +1823,6 @@ mod tests {
 
     #[test]
     fn scrubbing_coalesces_cached_previews_and_restores_exact_position_pause_and_feedback() {
-        if std::env::var_os("PLAVNO_SCRUB_TEST_CHILD").is_none() {
-            let config =
-                std::env::temp_dir().join(format!("plavno-scrub-alsa-{}.conf", std::process::id()));
-            std::fs::write(&config, "pcm.!default { type null }\n").unwrap();
-            let result = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "engine::tests::scrubbing_coalesces_cached_previews_and_restores_exact_position_pause_and_feedback", "--nocapture"])
-                .env("PLAVNO_SCRUB_TEST_CHILD", "1")
-                .env("ALSA_CONFIG_PATH", &config)
-                .output();
-            std::fs::remove_file(config).unwrap();
-            let result = result.unwrap();
-            assert!(
-                result.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&result.stdout),
-                String::from_utf8_lossy(&result.stderr)
-            );
-            return;
-        }
         let log = Arc::new(Mutex::new(ServiceLog::default()));
         let (mut engine, _, events) = Engine::new(Box::new(TestBackend(log.clone()))).unwrap();
         engine.paused = true;
@@ -1963,27 +1928,8 @@ mod tests {
             .is_some_and(|p| matches!(p.result, Some(Ok(_))))
     }
 
-    // ALSA's null device runs in a child process, so tests never change global audio settings.
-    #[cfg(target_os = "linux")]
     #[test]
     fn dislikes_filter_navigation_history_and_favorites_without_depending_on_service_sync() {
-        if std::env::var_os("PLAVNO_DISLIKE_TEST_CHILD").is_none() {
-            let config = std::env::temp_dir()
-                .join(format!("plavno-dislike-alsa-{}.conf", std::process::id()));
-            std::fs::write(&config, "pcm.!default { type null }\n").unwrap();
-            let result = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "engine::tests::dislikes_filter_navigation_history_and_favorites_without_depending_on_service_sync", "--nocapture"])
-                .env("PLAVNO_DISLIKE_TEST_CHILD", "1").env("ALSA_CONFIG_PATH", &config).output();
-            std::fs::remove_file(config).unwrap();
-            let result = result.unwrap();
-            assert!(
-                result.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&result.stdout),
-                String::from_utf8_lossy(&result.stderr)
-            );
-            return;
-        }
         let log = Arc::new(Mutex::new(ServiceLog {
             dislike_fail: true,
             ..ServiceLog::default()
@@ -2087,26 +2033,6 @@ mod tests {
 
     #[test]
     fn prefetch_reuses_prepared_and_pending_streams_and_cancels_stale_work() {
-        if std::env::var_os("PLAVNO_PREFETCH_TEST_CHILD").is_none() {
-            let config =
-                std::env::temp_dir().join(format!("plavno-test-alsa-{}.conf", std::process::id()));
-            std::fs::write(&config, "pcm.!default { type null }\n").unwrap();
-            let result = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "engine::tests::prefetch_reuses_prepared_and_pending_streams_and_cancels_stale_work", "--nocapture"])
-                .env("PLAVNO_PREFETCH_TEST_CHILD", "1")
-                .env("ALSA_CONFIG_PATH", &config)
-                .output();
-            std::fs::remove_file(config).unwrap();
-            let result = result.unwrap();
-            assert!(
-                result.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&result.stdout),
-                String::from_utf8_lossy(&result.stderr)
-            );
-            return;
-        }
-
         vk_supports_my_music_shuffle();
         let throttled = Arc::new(Mutex::new(ServiceLog {
             fail: Some("2".into()),

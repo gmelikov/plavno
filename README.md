@@ -2,7 +2,7 @@
 
 # plavno
 
-A lightweight TUI player for Linux with music streams from popular services, library shuffle, and mouse controls.
+A lightweight TUI player for Linux and macOS with music streams from popular services, library shuffle, and mouse controls.
 
 <img src="intro.png" alt="plavno terminal player with album artwork and an audio-reactive wave" width="885">
 
@@ -14,7 +14,7 @@ A lightweight TUI player for Linux with music streams from popular services, lib
 
 ## Features
 
-- **MPRIS desktop integration** — control playback with media keys, desktop media
+- **MPRIS desktop integration (Linux)** — control playback with media keys, desktop media
   widgets, or `playerctl`. Track information and album artwork appear in desktop controls.
 - **Service waves and shuffle** — Yandex My Vibe, VK recommendations, library shuffle,
   and Wave Shuffle across connected services.
@@ -26,7 +26,7 @@ A lightweight TUI player for Linux with music streams from popular services, lib
 
 ## Quick start
 
-Install from crates.io (requires Rust, pkg-config, ALSA and D-Bus headers):
+Install from crates.io with Rust. Linux also requires pkg-config, ALSA and D-Bus headers:
 
 ```sh
 cargo install plavno --locked
@@ -44,6 +44,14 @@ and run `./plavno`, or place it in `~/.local/bin`.
 Audio uses the ALSA default device; PipeWire/PulseAudio needs its ALSA plugin.
 Install ffmpeg for HLS playback. Optional Spotify and YouTube helpers are built separately.
 
+On macOS, build from the checkout below after installing Rust and Xcode Command
+Line Tools (`xcode-select --install`). Playback uses the CoreAudio default output;
+ALSA and D-Bus are not required. Install ffmpeg with `brew install ffmpeg` for HLS.
+Chrome/Chromium is detected in `/Applications`, `~/Applications`, or PATH.
+Desktop media controls use MPRIS on Linux. macOS media keys and Now Playing are
+not integrated yet; use the TUI controls. Sixel rendering needs a terminal with sixel support;
+the default braille renderer works without it.
+
 To build from source:
 
 ```sh
@@ -54,6 +62,11 @@ plavno sources
 
 Connect a service below, then start it with `plavno --source SOURCE`.
 For development, use `cargo run` or `cargo check` and keep the build cache.
+CI checks the player and both helpers on Linux and macOS 15 (Apple Silicon and
+Intel). `cargo test --locked --features test-audio` also runs the PTY UI tests on
+macOS without a physical output device. Unit tests use a software audio sink;
+the `test-audio` feature enables that sink in the test executable only when
+`PLAVNO_TEST_AUDIO=1` is set. Normal builds use the platform's audio device.
 
 ## Services
 

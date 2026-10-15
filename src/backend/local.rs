@@ -282,7 +282,7 @@ fn track_path(track: &Track) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::{
-        os::unix::{ffi::OsStringExt, fs::symlink},
+        os::unix::fs::symlink,
         time::{Duration, SystemTime},
     };
 
@@ -290,14 +290,18 @@ mod tests {
 
     impl Library {
         fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let suffix = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let root =
-                std::env::temp_dir().join(format!("plavno-local-{}-{suffix}", std::process::id()));
+            let index = NEXT.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "plavno-local-{}-{suffix}-{index}",
+                std::process::id()
+            ));
             fs::create_dir(&root).unwrap();
-            Self(root)
+            Self(root.canonicalize().unwrap())
         }
         fn track(&self, name: impl AsRef<Path>) -> PathBuf {
             let path = self.0.join(name);
@@ -414,9 +418,9 @@ mod tests {
     }
 
     #[test]
-    fn invalid_deleted_and_non_utf8_files_are_handled_without_losing_playable_tracks() {
+    fn invalid_and_deleted_files_are_handled_without_losing_playable_tracks() {
         let library = Library::new();
-        let valid = library.track(std::ffi::OsString::from_vec(b"track-\xff.flac".to_vec()));
+        let valid = library.track("track-музыка.flac");
         let corrupt = library.0.join("corrupt.flac");
         fs::write(&corrupt, b"not audio").unwrap();
         let mut backend = LocalDirectory::new(library.0.clone()).unwrap();
@@ -440,6 +444,15 @@ mod tests {
         }
         fs::remove_file(valid).unwrap();
         assert!(backend.next_batch().is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_audio_paths_round_trip_without_loss() {
+        use std::os::unix::ffi::OsStringExt;
+        let library = Library::new();
+        let path = library.track(std::ffi::OsString::from_vec(b"track-\xff.flac".to_vec()));
+        assert_eq!(track_path(&local_track(&path).unwrap()).unwrap(), path);
     }
 
     #[test]

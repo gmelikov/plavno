@@ -4,14 +4,18 @@ struct ConfigDir(PathBuf);
 
 impl ConfigDir {
     fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let suffix = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("plavno-services-{}-{suffix}", std::process::id()));
+        let index = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "plavno-services-{}-{suffix}-{index}",
+            std::process::id()
+        ));
         fs::create_dir(&path).unwrap();
-        Self(path)
+        Self(path.canonicalize().unwrap())
     }
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_plavno"));
@@ -30,14 +34,7 @@ impl Drop for ConfigDir {
 
 #[test]
 fn sources_lists_yandex_with_and_without_a_connected_account() {
-    let suffix = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let config = ConfigDir(
-        std::env::temp_dir().join(format!("plavno-services-{}-{suffix}", std::process::id())),
-    );
-    fs::create_dir(&config.0).unwrap();
+    let config = ConfigDir::new();
     for connected in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_plavno"));
         command

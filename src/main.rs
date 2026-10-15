@@ -15,6 +15,10 @@ mod engine;
 mod flow_view;
 mod history;
 mod history_view;
+#[cfg(target_os = "linux")]
+mod mpris;
+#[cfg(not(target_os = "linux"))]
+#[path = "mpris_stub.rs"]
 mod mpris;
 mod sixel;
 mod source_view;
@@ -191,6 +195,7 @@ fn run() -> Result<()> {
     if favorites {
         engine.mode = backend::PlaybackMode::FavoritesShuffle;
     }
+    #[cfg(target_os = "linux")]
     let mpris = match mpris::Mpris::new(&engine, events.clone()) {
         Ok(mpris) => Some(mpris),
         Err(error) => {
@@ -198,6 +203,8 @@ fn run() -> Result<()> {
             None
         }
     };
+    #[cfg(not(target_os = "linux"))]
+    let mpris = None;
     tui::run(
         engine,
         events,

@@ -1,7 +1,9 @@
 use crate::backend::{Input, network_error_at, yandex_http};
 use anyhow::{Context, Result};
 use ctr::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
-use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
+#[cfg(not(test))]
+use rodio::OutputStreamBuilder;
+use rodio::{Decoder, OutputStream, Sink, Source, mixer::Mixer};
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -157,29 +159,94 @@ pub struct Prepared {
 }
 
 pub struct Audio {
-    stream: OutputStream,
+    _stream: Option<OutputStream>,
+    mixer: Mixer,
     pub sink: Sink,
+    #[cfg(any(test, feature = "test-audio"))]
+    _test_output: Option<TestOutput>,
 }
 
 impl Audio {
+    #[cfg(test)]
     pub fn new() -> Result<Self> {
-        let mut stream = OutputStreamBuilder::open_default_stream()
-            .context("Failed to open the audio device; check ALSA/PipeWire/PulseAudio")?;
+        Self::test_output()
+    }
+
+    #[cfg(not(test))]
+    pub fn new() -> Result<Self> {
+        #[cfg(feature = "test-audio")]
+        if std::env::var_os("PLAVNO_TEST_AUDIO").is_some_and(|value| value == "1") {
+            return Self::test_output();
+        }
+        let mut stream =
+            OutputStreamBuilder::open_default_stream().context(if cfg!(target_os = "macos") {
+                "Failed to open the CoreAudio default output; check macOS Sound settings"
+            } else {
+                "Failed to open the audio device; check ALSA/PipeWire/PulseAudio"
+            })?;
         stream.log_on_drop(false);
         let sink = Sink::connect_new(stream.mixer());
         sink.set_volume(1.0);
-        Ok(Self { stream, sink })
+        let mixer = stream.mixer().clone();
+        Ok(Self {
+            _stream: Some(stream),
+            mixer,
+            sink,
+            #[cfg(feature = "test-audio")]
+            _test_output: None,
+        })
+    }
+
+    #[cfg(any(test, feature = "test-audio"))]
+    fn test_output() -> Result<Self> {
+        let (mixer, mut output) = rodio::mixer::mixer(2, 44_100);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let worker = std::thread::Builder::new()
+            .name("test-audio".into())
+            .spawn(move || {
+                while !stopped.load(Ordering::Relaxed) {
+                    output.by_ref().take(882).for_each(drop);
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            })?;
+        let sink = Sink::connect_new(&mixer);
+        Ok(Self {
+            _stream: None,
+            mixer,
+            sink,
+            _test_output: Some(TestOutput {
+                stop,
+                worker: Some(worker),
+            }),
+        })
     }
 
     pub fn play(&mut self, source: PcmSource, paused: bool, volume: f32, speed: f32) {
         self.sink.stop();
-        self.sink = Sink::connect_new(self.stream.mixer());
+        self.sink = Sink::connect_new(&self.mixer);
         self.sink.set_volume(volume);
         self.sink.set_speed(speed);
         if paused {
             self.sink.pause();
         }
         self.sink.append(source);
+    }
+}
+
+#[cfg(any(test, feature = "test-audio"))]
+struct TestOutput {
+    stop: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(any(test, feature = "test-audio"))]
+impl Drop for TestOutput {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -1381,6 +1448,7 @@ mod tests {
                     }
                     Err(error) => panic!("{error}"),
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -1448,6 +1516,7 @@ mod tests {
                         }
                         Err(error) => panic!("{error}"),
                     };
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();

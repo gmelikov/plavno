@@ -10,7 +10,7 @@ Configure the publisher for `gmelikov/plavno` on crates.io with workflow filenam
 `publish.yml`. Leave GitHub Environment empty unless the publishing job also names
 that same environment.
 
-The [publishing workflow](../.github/workflows/publish.yml) runs all three CI jobs,
+The [publishing workflow](../.github/workflows/publish.yml) runs CI for all three packages on Linux and macOS,
 checks that the release commit is on `master`, verifies the package, and obtains
 a short-lived token through GitHub OIDC. The token is revoked when the job ends;
 no crates.io API token secret is needed in GitHub.

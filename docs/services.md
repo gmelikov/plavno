@@ -35,6 +35,9 @@ and concurrent player/diagnostic runs; valid cached CDN links remain usable.
 with a temporary profile. Complete sign-in, including any 2FA or QR steps.
 `PLAVNO_BROWSER=/absolute/path/to/browser` overrides detection. The temporary
 profile is removed afterward; playback needs no running browser.
+On macOS, Chrome/Chromium may be installed in `/Applications` or `~/Applications`;
+`PLAVNO_BROWSER` can also point inside an app bundle, for example
+`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`.
 SoundCloud asks for a station seed if none was detected.
 
 For manual setup, use your regular browser's DevTools → **Network**:
@@ -107,7 +110,7 @@ Both helpers select supported full audio at the best available quality.
 
 ## Diagnostics
 
-`plavno sources` lists all five supported services, including Yandex Music,
+`plavno sources` lists the streaming services and local directory source
 with their connection status. `plavno diagnose vk` checks response
 structure and library authentication without printing session values.
 For expired sessions, repeat browser login or manual import.

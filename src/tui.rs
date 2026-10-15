@@ -498,6 +498,7 @@ pub fn run(
         }
     }
     let done = engine.shutdown();
+    #[cfg(target_os = "linux")]
     drop(mpris);
     drop(guard);
     if done.recv_timeout(Duration::from_secs(2)).is_err() {
