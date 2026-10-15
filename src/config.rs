@@ -27,12 +27,12 @@ type Registry = (
 );
 
 pub fn backends() -> Result<Registry> {
-    use crate::backend::{Backend, Bridge, Service, SoundCloud, Vk, Yandex};
+    use crate::backend::{Backend, Bridge, Service, SoundCloud, Vk};
     let mut backends: Vec<Box<dyn Backend>> = Vec::new();
     let mut services = Vec::new();
     match load() {
         Ok(token) => {
-            backends.push(Box::new(Yandex::new(token)));
+            backends.push(Box::new(yandex_with_token(token)));
             services.push(Service {
                 key: "yandex",
                 name: "Yandex Music",
@@ -83,6 +83,19 @@ pub fn backends() -> Result<Registry> {
         }
     }
     Ok((backends, services))
+}
+
+pub fn yandex_with_token(token: String) -> crate::backend::Yandex {
+    let directory = env::var_os("XDG_CACHE_HOME")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")));
+    match directory {
+        Some(directory) => {
+            crate::backend::Yandex::with_cache(token, directory.join("plavno/yandex-streams"))
+        }
+        None => crate::backend::Yandex::new(token),
+    }
 }
 
 pub fn login_provider(source: &str) -> Result<()> {

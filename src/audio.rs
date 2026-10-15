@@ -1,4 +1,4 @@
-use crate::backend::{Input, yandex_http};
+use crate::backend::{Input, network_error_at, yandex_http};
 use anyhow::{Context, Result};
 use ctr::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
@@ -260,7 +260,7 @@ impl Read for HttpReader {
                     ),
                 )
                 .call()
-                .map_err(|_| io::Error::other("Failed to fetch an audio stream chunk"))?;
+                .map_err(|error| io::Error::other(network_error_at(&self.url, error)))?;
             let mut expected_length = None;
             match response.status().as_u16() {
                 206 => {
@@ -306,7 +306,7 @@ impl Read for HttpReader {
                 .with_config()
                 .limit(HTTP_CHUNK as u64 + 1)
                 .read_to_vec()
-                .map_err(|_| io::Error::other("Failed to read an audio stream chunk"))?;
+                .map_err(|error| io::Error::other(network_error_at(&self.url, error)))?;
             if data.len() > HTTP_CHUNK {
                 return Err(io::Error::other(
                     "The server does not support bounded HTTP ranges",

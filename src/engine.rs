@@ -977,6 +977,19 @@ impl Engine {
                             return;
                         }
                         None => return,
+                        Some(Err(error))
+                            if error
+                                .downcast_ref::<crate::backend::RateLimited>()
+                                .is_some_and(|limit| limit.active()) =>
+                        {
+                            self.handle(Event::Prepared(
+                                self.epoch,
+                                self.active_serial,
+                                track,
+                                Err(error),
+                            ));
+                            return;
+                        }
                         Some(Err(_)) => self.cancel.store(true, Ordering::Relaxed),
                     }
                 } else {
@@ -1140,9 +1153,13 @@ impl Engine {
                     && self.cache_keys().contains(&key)
                 {
                     self.warming.remove(&key);
-                    if let Ok(buffer) = result {
-                        self.cache.insert(key, buffer);
-                    }
+                    let failure = match result {
+                        Ok(buffer) => {
+                            self.cache.insert(key, buffer);
+                            None
+                        }
+                        Err(error) => Some(error),
+                    };
                     let pending = if self.preparing
                         && self.seeking.is_none()
                         && self
@@ -1164,7 +1181,15 @@ impl Engine {
                             .map(|p| (p.serial, p.cancel.clone(), p.track.clone()))
                     };
                     if let Some((serial, cancel, track)) = pending {
-                        self.prepare_track(serial, track, cancel);
+                        if let Some(error) = failure
+                            && error
+                                .downcast_ref::<crate::backend::RateLimited>()
+                                .is_some_and(|limit| limit.active())
+                        {
+                            self.handle(Event::Prepared(self.epoch, serial, track, Err(error)));
+                        } else {
+                            self.prepare_track(serial, track, cancel);
+                        }
                     }
                 }
             }
@@ -1514,6 +1539,7 @@ mod tests {
             artist: String::new(),
             duration: Some(120.0),
             cover_url: None,
+            genre: None,
             batch: format!("batch-{id}"),
         }
     }
@@ -1598,6 +1624,7 @@ mod tests {
         feedback: Vec<(String, String, Feedback, f64)>,
         gate: Option<(String, Receiver<()>)>,
         fail: Option<String>,
+        rate_limited: bool,
         favorite: bool,
         favorite_changes: usize,
         favorite_fail: bool,
@@ -1692,6 +1719,11 @@ mod tests {
                 log.resolved.push((track.cache_key(), track.batch.clone()));
                 if log.fail.as_ref() == Some(&track.cache_key()) {
                     log.fail = None;
+                    if log.rate_limited {
+                        return Err(
+                            crate::backend::RateLimited::new(Duration::from_secs(60)).into()
+                        );
+                    }
                     anyhow::bail!("Temporary error");
                 }
                 if log
@@ -2008,6 +2040,35 @@ mod tests {
         }
 
         vk_supports_my_music_shuffle();
+        let throttled = Arc::new(Mutex::new(ServiceLog {
+            fail: Some("2".into()),
+            rate_limited: true,
+            ..ServiceLog::default()
+        }));
+        let (mut limited_engine, _, limited_events) =
+            Engine::new(Box::new(TestBackend(throttled.clone()))).unwrap();
+        limited_engine.paused = true;
+        limited_engine.start();
+        pump(&mut limited_engine, &limited_events, |e| {
+            e.prefetch
+                .as_ref()
+                .is_some_and(|p| matches!(p.result, Some(Err(_))))
+        });
+        limited_engine.next();
+        pump(&mut limited_engine, &limited_events, |e| !e.preparing);
+        assert_eq!(
+            throttled
+                .lock()
+                .unwrap()
+                .resolved
+                .iter()
+                .filter(|(id, _)| id == "2")
+                .count(),
+            1,
+            "A throttled prefetch was resolved again immediately"
+        );
+        assert!(limited_engine.message.contains("429"));
+        drop(limited_engine);
         let log = Arc::new(Mutex::new(ServiceLog {
             favorite: true,
             ..ServiceLog::default()

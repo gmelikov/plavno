@@ -160,6 +160,7 @@ mod tests {
             artist: "Artist".into(),
             duration: None,
             cover_url: None,
+            genre: None,
             batch: "session".into(),
         }
     }

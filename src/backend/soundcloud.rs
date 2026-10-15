@@ -207,6 +207,10 @@ fn metadata(item: &Value) -> Option<Track> {
         cover_url: item["artwork_url"]
             .as_str()
             .map(|url| url.replace("-large.", "-t500x500.")),
+        genre: item["genre"]
+            .as_str()
+            .filter(|genre| !genre.trim().is_empty())
+            .map(str::to_owned),
         batch: String::new(),
     })
 }
@@ -364,7 +368,7 @@ mod tests {
 
     #[test]
     fn native_station_and_resolution_choose_the_highest_full_stream() {
-        let item = json!({"id":12,"title":"Full track","duration":120000,"policy":"ALLOW","user":{"username":"Artist"},"permalink_url":"https://soundcloud.com/artist/track"});
+        let item = json!({"id":12,"title":"Full track","genre":"Deep House","duration":120000,"policy":"ALLOW","user":{"username":"Artist"},"permalink_url":"https://soundcloud.com/artist/track"});
         let (base, server) = web::fixture_server(|base| {
             let mut media = item.clone();
             media["media"] = json!({"transcodings":[
@@ -388,6 +392,7 @@ mod tests {
         let tracks = backend.start().unwrap();
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].id, "12");
+        assert_eq!(tracks[0].genre.as_deref(), Some("Deep House"));
         match backend.resolve(&tracks[0]).unwrap() {
             Input::Http {
                 url, hint, quality, ..

@@ -1,4 +1,4 @@
-use crate::{backend::PlaybackMode, engine::Engine};
+use crate::{backend::PlaybackMode, engine::Engine, visualization::Mode};
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
@@ -73,6 +73,7 @@ fn button_specs(engine: &Engine) -> Vec<ButtonSpec> {
         ),
         ("Wave", "w", KeyCode::Char('w'), true),
         ("Visual", "v", KeyCode::Char('v'), true),
+        ("Dance", "b", KeyCode::Char('b'), true),
         ("Flow", "g", KeyCode::Char('g'), engine.can_tune_wave()),
         ("Quit", "q", KeyCode::Char('q'), true),
         ("Undo", "u", KeyCode::Char('u'), engine.can_undo_dislike()),
@@ -396,6 +397,21 @@ impl Controls {
         self.speed = Rect::default();
     }
 
+    fn hovered_transport(&self) -> Option<&Button> {
+        let Some(Target::Transport(key)) = self.hover else {
+            return None;
+        };
+        self.transport
+            .iter()
+            .find(|zone| zone.key == key && zone.enabled)
+    }
+
+    pub fn highlight_transport(&self, buffer: &mut Buffer) {
+        if let Some(zone) = self.hovered_transport() {
+            highlight_zone(zone.area, buffer);
+        }
+    }
+
     pub fn draw_transport(&mut self, frame: &mut Frame, area: Rect, text: Rect, engine: &Engine) {
         self.text = text;
         self.transport = transport_areas(area)
@@ -407,18 +423,11 @@ impl Controls {
             ])
             .map(|(area, (key, enabled))| Button { area, key, enabled })
             .collect();
-        let Some(Target::Transport(key)) = self.hover else {
-            return;
-        };
-        let Some(zone) = self
-            .transport
-            .iter()
-            .find(|zone| zone.key == key && zone.enabled)
-        else {
+        let Some(zone) = self.hovered_transport() else {
             return;
         };
         highlight_zone(zone.area, frame.buffer_mut());
-        let label = match key {
+        let label = match zone.key {
             KeyCode::Char('p') => "‹ Prev · p",
             KeyCode::Char(' ') if engine.playback_status() == "Playing" => "Pause · Space",
             KeyCode::Char(' ') => "Play · Space",
@@ -507,7 +516,7 @@ impl Controls {
         );
     }
 
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect, engine: &Engine, wave_enabled: bool) {
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, engine: &Engine, visual: Option<Mode>) {
         let buttons = button_specs(engine);
         for (button, position) in buttons.iter().zip(button_layout(area.width, &buttons)) {
             if position.y >= area.height || position.is_empty() {
@@ -539,7 +548,8 @@ impl Controls {
                 KeyCode::Char('w') => {
                     engine.mode == PlaybackMode::MyVibe && engine.source != "mixed"
                 }
-                KeyCode::Char('v') => wave_enabled,
+                KeyCode::Char('v') => visual.is_some(),
+                KeyCode::Char('b') => visual == Some(Mode::Dance),
                 KeyCode::Char('g') => {
                     engine.can_tune_wave()
                         && engine.wave_style() != crate::backend::WaveStyle::Balanced

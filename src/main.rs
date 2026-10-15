@@ -2,18 +2,27 @@ mod artwork;
 mod audio;
 mod backend;
 mod browser_login;
+mod cached_frame;
+mod choreography;
 mod config;
 mod controls;
+mod dance_balance;
+mod dance_motion;
+mod dance_space;
+mod dancer;
 mod dislikes;
 mod engine;
 mod flow_view;
 mod history;
 mod history_view;
 mod mpris;
+mod sixel;
 mod source_view;
+mod spring;
 mod stream;
 mod text_selection;
 mod tui;
+mod visualization;
 mod wave;
 
 use anyhow::{Result, bail};
@@ -39,7 +48,7 @@ fn run() -> Result<()> {
         .is_some_and(|arg| arg == "--help" || arg == "-h")
     {
         println!(
-            "plavno — a lightweight music TUI\n\n  plavno                        play the first connected service\n  plavno --source SOURCE        yandex / soundcloud / spotify / vk / ytmusic / mixed\n  plavno --favorites            shuffle favorites (default: Yandex; --source vk: My Music)\n  plavno --no-wave              start with the animated waveform hidden\n  plavno login [SOURCE]         connect a service (default: yandex; SoundCloud/VK: browser)\n  plavno login yandex           paste a Yandex Music OAuth token\n  plavno login SOURCE --manual  paste a JSON profile without browser automation\n  plavno diagnose vk           inspect the VK response layout (no session values)\n  plavno sources                list service configuration\n  plavno --file FILE            play a local file\n\nSpace pause · x stop · p/n tracks · ←/→ ±5s · Shift+←/→ ±30s\nClick controls · drag progress · scroll bar to seek, elsewhere volume · h or / history\nHistory: type to search · ↑/↓ select · Enter play · Esc back\ns sources · m Wave Shuffle · w restart wave · f Favorites Shuffle\ng Flow settings · v toggle visualization · l ♥/♡ favorites · d dislike · u undo dislike\n+/- volume · q quit"
+            "plavno — a lightweight music TUI\n\n  plavno                        play the first connected service\n  plavno --source SOURCE        yandex / soundcloud / spotify / vk / ytmusic / mixed\n  plavno --favorites            shuffle favorites (default: Yandex; --source vk: My Music)\n  plavno --no-wave              start with visualization hidden\n  plavno --dance                show the wave and dancing silhouette\n  plavno --dance-style STYLE    auto / flow / groove / pulse / house / hiphop / rave\n  plavno --renderer MODE        dancer output: auto / braille / sixel\n  plavno --sixel-update MODE    diff (default) / full\n  plavno login [SOURCE]         connect a service (default: yandex; SoundCloud/VK: browser)\n  plavno login yandex           paste a Yandex Music OAuth token\n  plavno login SOURCE --manual  paste a JSON profile without browser automation\n  plavno diagnose yandex       check API access and audio CDN connectivity\n  plavno diagnose vk           inspect the VK response layout (no session values)\n  plavno sources                list service configuration\n  plavno --file FILE            play a local file\n\nSpace pause · x stop · p/n tracks · ←/→ ±5s · Shift+←/→ ±30s\nClick controls · drag progress · scroll bar to seek, Speed to change rate, elsewhere volume · h or / history\nHistory: type to search · ↑/↓ select · Enter play · Esc back\ns sources · m Wave Shuffle · w restart wave · f Favorites Shuffle\ng Flow settings · v toggle visualization · b wave/dance · l ♥/♡ favorites · d dislike · u undo dislike\n+/- volume · [/] playback speed · q quit"
         );
         return Ok(());
     }
@@ -64,9 +73,12 @@ fn run() -> Result<()> {
     }
     if let [command, source] = args.as_slice()
         && command == "diagnose"
-        && source == "vk"
     {
-        let report = backend::Vk::new(config::profile_path("vk")?).diagnose()?;
+        let report = match source.to_str() {
+            Some("yandex") => config::yandex_with_token(config::load()?).diagnose(),
+            Some("vk") => backend::Vk::new(config::profile_path("vk")?).diagnose()?,
+            _ => bail!("diagnose requires yandex or vk"),
+        };
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
@@ -80,6 +92,10 @@ fn run() -> Result<()> {
     }
     let mut favorites = false;
     let mut no_wave = false;
+    let mut visual_mode = visualization::Mode::Wave;
+    let mut dance_style = dance_motion::Style::Auto;
+    let mut renderer = visualization::Renderer::Braille;
+    let mut sixel_update = sixel::UpdateMode::default();
     let mut selected = None;
     let mut file = None;
     let mut arguments = args.iter();
@@ -88,6 +104,31 @@ fn run() -> Result<()> {
             favorites = true;
         } else if arg == "--no-wave" {
             no_wave = true;
+        } else if arg == "--dance" {
+            visual_mode = visualization::Mode::Dance;
+        } else if arg == "--dance-style" {
+            dance_style = arguments
+                .next()
+                .and_then(|arg| arg.to_str())
+                .and_then(dance_motion::Style::parse)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--dance-style requires auto, flow, groove, pulse, house, hiphop, or rave"
+                    )
+                })?;
+            visual_mode = visualization::Mode::Dance;
+        } else if arg == "--renderer" {
+            renderer = match arguments.next().and_then(|arg| arg.to_str()) {
+                Some("auto" | "braille") => visualization::Renderer::Braille,
+                Some("sixel") => visualization::Renderer::Sixel,
+                _ => bail!("--renderer requires auto, braille, or sixel"),
+            };
+        } else if arg == "--sixel-update" {
+            sixel_update = match arguments.next().and_then(|arg| arg.to_str()) {
+                Some("full") => sixel::UpdateMode::Full,
+                Some("diff") => sixel::UpdateMode::Diff,
+                _ => bail!("--sixel-update requires full or diff"),
+            };
         } else if arg == "--source" {
             selected = Some(
                 arguments
@@ -132,5 +173,17 @@ fn run() -> Result<()> {
             None
         }
     };
-    tui::run(engine, events, receiver, mpris, !no_wave)
+    tui::run(
+        engine,
+        events,
+        receiver,
+        mpris,
+        !no_wave,
+        visualization::Options {
+            mode: visual_mode,
+            style: dance_style,
+            renderer,
+            sixel_update,
+        },
+    )
 }

@@ -656,6 +656,7 @@ fn parse_track(item: &Value) -> Option<Track> {
                     })
             })
             .map(str::to_owned),
+        genre: None,
         batch: String::new(),
     })
 }
@@ -1560,6 +1561,7 @@ mod tests {
             artist: "Artist".into(),
             duration: Some(120.0),
             cover_url: None,
+            genre: None,
             batch: String::new(),
         }
     }

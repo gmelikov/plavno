@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 pub enum Action {
     Close,
-    Play(Entry),
+    Play(Box<Entry>),
 }
 
 pub struct HistoryView {
@@ -67,9 +67,9 @@ impl HistoryView {
 
     fn play(&self) -> Option<Action> {
         let index = self.state.selected()?;
-        Some(Action::Play(
+        Some(Action::Play(Box::new(
             self.entries[*self.filtered.get(index)?].clone(),
-        ))
+        )))
     }
 
     pub fn handle(&mut self, event: Event) -> Option<Action> {
@@ -274,6 +274,7 @@ mod tests {
                     artist: "Artist".into(),
                     duration: None,
                     cover_url: None,
+                    genre: None,
                     batch: String::new(),
                 },
             })

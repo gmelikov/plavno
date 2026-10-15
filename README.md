@@ -129,8 +129,29 @@ Buttons display their hotkeys and support mouse clicks.
 | w / f | New wave / library shuffle (VK: My Music) |
 | g | Flow: Calm, Balanced, Energetic, Work; choose with 1–4 or a click |
 | v | Toggle visualization |
+| b | Toggle a dancing silhouette over the wave; `--dance` starts with both |
 | Ctrl+C | Copy selected text; quit when nothing is selected |
 | Esc / q | Clear selection or close a view / quit |
+
+Use `--dance` for a continuous, audio-reactive silhouette drawn in the same Braille
+style as the wave, which stays visible. The prototype blends free-flowing gestures,
+weight-shifting groove, and sharper pulse accents based on rhythm and energy.
+Variable phrases mix club footwork, torso accents, stage travel, crouches, and jumps.
+A 3D skeleton turns the body and head; projected limbs shorten naturally, with
+depth-based occlusion in the CPU Braille renderer.
+Track changes retain the pose and blend into the next movement character. Strong beats drive
+body impulses; overcommitted moves can lead to a recovery step or a rare fall.
+Subtle rim lighting and small face details help the figure stand out over album art.
+`auto` mixes house-inspired footwork, hip-hop rocks, and rave-inspired steps using
+tempo, energy, and available genre metadata (Yandex/SoundCloud). Ambient favors Flow.
+Compare with `--dance-style house`, `hiphop`, or `rave`; `flow`, `groove`, and `pulse`
+remain available as basic movement profiles.
+`--renderer auto` and `--renderer braille` select terminal dots. To compare native
+pixels in foot: `plavno --dance-style flow --renderer sixel`. The wave stays in
+Braille; sixel draws the dancer over it. Run directly in the terminal if a
+multiplexer hides its pixel dimensions.
+Sixel defaults to `--sixel-update diff`, restoring and redrawing only the changed
+region. Use `--sixel-update full` to clear and repaint each frame instead.
 
 Hover over the album artwork: the left third plays the previous track, the center
 toggles playback, and the right third plays the next track. Click the progress bar

@@ -126,6 +126,7 @@ mod tests {
                 artist: "My artist".into(),
                 duration: Some(60.0),
                 cover_url: Some("https://example.com/cover.jpg".into()),
+                genre: None,
                 batch: "old-session".into(),
             },
         )

@@ -312,6 +312,7 @@ mod tests {
                 artist: "Test".into(),
                 duration: Some(60.0),
                 cover_url: None,
+                genre: None,
                 batch: "session".into(),
             }])
         }

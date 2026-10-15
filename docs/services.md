@@ -16,6 +16,19 @@ format; the TUI shows the actual quality.
 Use `plavno --source yandex` for My Vibe or `plavno --source yandex --favorites`
 for library shuffle. Yandex Music is also available in the Sources menu and Wave Shuffle.
 
+For connection errors, run `plavno diagnose yandex`. It checks account access,
+favorites, stream resolution and a 1 KiB audio CDN download without playing
+or changing your library. The report omits credentials and signed audio URLs.
+
+Yandex stream metadata is cached for 5 minutes (up to 64 tracks per token and
+quality policy) in `$XDG_CACHE_HOME/plavno/yandex-streams`, or
+`~/.cache/plavno/yandex-streams`. Files use permissions 0600; they contain signed
+URLs and stream keys, so keep them private. A 1-byte CDN probe checks cached links
+before reuse; expired links are resolved again once. Audio buffers remain in RAM.
+HTTP 429 pauses Yandex API requests according to `Retry-After`; without that
+header, backoff grows from 60 seconds to 15 minutes. The pause survives restart
+and concurrent player/diagnostic runs; valid cached CDN links remain usable.
+
 ## VK and SoundCloud
 
 `plavno login vk` and `plavno login soundcloud` open installed Chrome/Chromium

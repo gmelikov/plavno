@@ -1,6 +1,7 @@
 use crate::{
     artwork::Artwork,
     backend::PlaybackMode,
+    cached_frame::CachedFrame,
     controls::{self, Controls},
     engine::{Command, Engine, Event},
     flow_view::{self, FlowView},
@@ -8,7 +9,8 @@ use crate::{
     mpris::Mpris,
     source_view::{self, SourceView},
     text_selection::{self, TextSelection},
-    wave::{FRAME_INTERVAL, Wave},
+    visualization::{Mode, Options, Renderer, Visualization},
+    wave::FRAME_INTERVAL,
 };
 use anyhow::Result;
 use crossterm::{
@@ -35,11 +37,80 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = execute!(
             std::io::stdout(),
+            crossterm::terminal::EndSynchronizedUpdate,
             DisableBracketedPaste,
             DisableFocusChange,
             DisableMouseCapture
         );
         ratatui::restore();
+    }
+}
+
+enum View {
+    Player,
+    History(HistoryView),
+    Sources(SourceView),
+    Flow(FlowView),
+}
+
+impl View {
+    fn is_player(&self) -> bool {
+        matches!(self, Self::Player)
+    }
+
+    fn wants_frames(&self, engine: &Engine, visual: Option<&Visualization>) -> bool {
+        self.is_player()
+            && (engine.track().is_some() && (!engine.paused || engine.is_scrubbing())
+                || visual.is_some_and(|visual| visual.wants_frames(engine)))
+    }
+
+    fn draw(&mut self, frame: &mut Frame) -> bool {
+        match self {
+            Self::Player => return false,
+            Self::History(history) => history.draw(frame),
+            Self::Sources(sources) => sources.draw(frame),
+            Self::Flow(flow) => flow.draw(frame),
+        }
+        true
+    }
+
+    fn handle(&mut self, event: event::Event, engine: &mut Engine) -> bool {
+        let redraw = matches!(self, Self::Flow(_))
+            || !matches!(&event, event::Event::Mouse(mouse) if mouse.kind == MouseEventKind::Moved);
+        let close = match self {
+            Self::Player => return false,
+            Self::History(history) => match history.handle(event) {
+                Some(Action::Close) => true,
+                Some(Action::Play(entry)) => {
+                    engine.play_history(&entry);
+                    true
+                }
+                None => false,
+            },
+            Self::Sources(sources) => match sources.handle(event) {
+                Some(source_view::Action::Close) => true,
+                Some(source_view::Action::Select(key)) => {
+                    engine.start_source(key);
+                    engine
+                        .services
+                        .iter()
+                        .any(|service| service.key == key && service.available)
+                }
+                None => false,
+            },
+            Self::Flow(flow) => match flow.handle(event) {
+                Some(flow_view::Action::Close) => true,
+                Some(flow_view::Action::Apply(style)) => {
+                    engine.set_wave_style(style);
+                    true
+                }
+                None => false,
+            },
+        };
+        if close {
+            *self = Self::Player;
+        }
+        redraw
     }
 }
 
@@ -49,7 +120,14 @@ pub fn run(
     receiver: std::sync::mpsc::Receiver<Event>,
     mpris: Option<Mpris>,
     wave_enabled: bool,
+    options: Options,
 ) -> Result<()> {
+    let mut cell_size = if options.renderer == Renderer::Sixel {
+        Some(crate::sixel::CellSize::read()?)
+    } else {
+        None
+    };
+    let mut sixel = crate::sixel::Presenter::new(options.sixel_update);
     let mut terminal = ratatui::try_init()?;
     let guard = TerminalGuard;
     execute!(
@@ -76,69 +154,91 @@ pub fn run(
             }
         })?;
     engine.start();
-    let mut wave = wave_enabled.then(Wave::default);
+    let mut visual = Visualization::new(options);
+    let mut visual_enabled = wave_enabled;
     let mut artwork = Artwork::new()?;
+    let mut scene: Option<Scene> = None;
     let mut dirty = true;
     let mut last_draw = Instant::now();
     let mut last_mpris = Instant::now();
     let mut controls = Controls::default();
     let mut selection = TextSelection::default();
-    let mut history: Option<HistoryView> = None;
-    let mut flow: Option<FlowView> = None;
-    let mut sources = (!engine.services.iter().any(|s| s.available))
-        .then(|| SourceView::new(engine.services.clone(), engine.source));
+    let mut view = if engine.services.iter().any(|service| service.available) {
+        View::Player
+    } else {
+        View::Sources(SourceView::new(engine.services.clone(), engine.source))
+    };
     loop {
-        dirty |= artwork.update(
-            wave.as_ref()
-                .filter(|_| history.is_none() && sources.is_none() && flow.is_none())
-                .and_then(|_| engine.media_track())
-                .and_then(|track| track.cover_url.as_deref()),
-        );
-        let frame_interval = if wave.is_some() {
+        let artwork_changed = artwork.update(if visual_enabled && view.is_player() {
+            engine
+                .media_track()
+                .and_then(|track| track.cover_url.as_deref())
+        } else {
+            None
+        });
+        dirty |= artwork_changed;
+        if artwork_changed {
+            scene = None;
+        }
+        let frame_interval = if visual_enabled {
             FRAME_INTERVAL
         } else {
             Duration::from_millis(250)
         };
         if dirty {
-            if history.is_none()
-                && sources.is_none()
-                && flow.is_none()
-                && let Some(wave) = &mut wave
-            {
-                wave.update(&engine);
+            if view.is_player() && visual_enabled {
+                let columns = terminal.size()?.width;
+                visual.update(
+                    &engine,
+                    cell_size.map_or(columns, |cell| cell.dance_columns(columns)),
+                );
             }
-            terminal.draw(|frame| {
-                if let Some(flow) = &mut flow {
-                    flow.draw(frame);
-                    controls.reset();
-                    selection = TextSelection::default();
-                } else if let Some(sources) = &mut sources {
-                    sources.draw(frame);
-                    controls.reset();
-                    selection = TextSelection::default();
-                } else if let Some(history) = &mut history {
-                    history.draw(frame);
+            let visible_visual = visual_enabled.then_some(&visual);
+            let graphics = cell_size.is_some()
+                && view.is_player()
+                && visual_enabled
+                && visual.mode == Mode::Dance;
+            let full_redraw = sixel.full_redraw();
+            let mut sync = if graphics || sixel.active() {
+                Some(crate::sixel::FrameGuard::begin(full_redraw)?)
+            } else {
+                None
+            };
+            if sync.is_some() && full_redraw {
+                // The graphics clear invalidated the screen. Discard the previous
+                // text buffer so Ratatui paints it once, together with normal updates.
+                terminal.swap_buffers();
+            }
+            let mut dance_area = None;
+            let completed = terminal.draw(|frame| {
+                if view.draw(frame) {
                     controls.reset();
                     selection = TextSelection::default();
                 } else {
-                    draw(
+                    dance_area = draw(
                         frame,
                         &engine,
-                        wave.as_ref(),
+                        visible_visual,
                         &mut artwork,
                         &mut controls,
                         &mut selection,
+                        &mut scene,
                     );
                 }
             })?;
+            let image = dance_area.and_then(|area| {
+                visible_visual
+                    .zip(cell_size)
+                    .and_then(|(visual, cell)| visual.sixel(area, cell, completed.buffer))
+            });
+            if let Some(sync) = &mut sync {
+                sync.present(&mut sixel, image, completed.buffer, cell_size.unwrap())?;
+            }
+            drop(sync);
             last_draw = Instant::now();
             dirty = false;
         }
-        let updating = history.is_none()
-            && sources.is_none()
-            && flow.is_none()
-            && engine.track().is_some()
-            && (!engine.paused || engine.is_scrubbing());
+        let updating = view.wants_frames(&engine, visual_enabled.then_some(&visual));
         let wait = if updating {
             frame_interval.saturating_sub(last_draw.elapsed())
         } else {
@@ -154,61 +254,31 @@ pub fn run(
                 controls.cancel_drag();
                 selection.cancel_drag();
                 dirty = true;
-                if let Some(flow) = &mut flow {
+                if let View::Flow(flow) = &mut view {
                     flow.cancel_press();
                 }
             }
             Ok(Event::Terminal(event::Event::FocusGained)) => {
                 dirty = true;
             }
-            Ok(Event::Terminal(event)) if flow.is_some() => {
-                if matches!(&event, event::Event::Key(key) if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
-                {
-                    break;
+            Ok(Event::Terminal(event::Event::Resize(_, _))) => {
+                if cell_size.is_some() {
+                    cell_size = Some(crate::sixel::CellSize::read()?);
+                    sixel.invalidate();
                 }
-                match flow.as_mut().unwrap().handle(event) {
-                    Some(flow_view::Action::Close) => flow = None,
-                    Some(flow_view::Action::Apply(style)) => {
-                        engine.set_wave_style(style);
-                        flow = None;
-                    }
-                    None => {}
-                }
+                controls.reset();
+                selection.cancel_drag();
                 dirty = true;
+                if let View::Flow(flow) = &mut view {
+                    flow.cancel_press();
+                }
             }
-            Ok(Event::Terminal(event)) if sources.is_some() => {
-                let redraw = !matches!(&event,event::Event::Mouse(mouse) if mouse.kind == MouseEventKind::Moved);
+            Ok(Event::Terminal(event)) if !view.is_player() => {
                 if matches!(&event, event::Event::Key(key) if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
                 {
                     break;
                 }
-                match sources.as_mut().unwrap().handle(event) {
-                    Some(source_view::Action::Close) => sources = None,
-                    Some(source_view::Action::Select(key)) => {
-                        engine.start_source(key);
-                        if engine.services.iter().any(|s| s.key == key && s.available) {
-                            sources = None;
-                        }
-                    }
-                    None => {}
-                }
-                dirty |= redraw;
-            }
-            Ok(Event::Terminal(event)) if history.is_some() => {
-                let redraw = !matches!(&event,event::Event::Mouse(mouse) if mouse.kind == MouseEventKind::Moved);
-                if matches!(&event, event::Event::Key(key) if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
-                {
-                    break;
-                }
-                match history.as_mut().unwrap().handle(event) {
-                    Some(Action::Close) => history = None,
-                    Some(Action::Play(entry)) => {
-                        engine.play_history(&entry);
-                        history = None;
-                    }
-                    None => {}
-                }
-                dirty |= redraw;
+                dirty |= view.handle(event, &mut engine);
             }
             Ok(Event::Terminal(event)) => {
                 let mut redraw = true;
@@ -243,11 +313,6 @@ pub fn run(
                             }
                         }
                     }
-                    event::Event::Resize(_, _) => {
-                        controls.reset();
-                        selection = TextSelection::default();
-                        Some(event)
-                    }
                     other => Some(other),
                 };
                 if let Some(event) = event {
@@ -280,13 +345,14 @@ pub fn run(
                                     text_selection::copy_to_clipboard(std::io::stdout(), text)?;
                                     engine.message = "Selection sent to terminal clipboard".into();
                                     dirty = true;
+                                    scene = None;
                                     continue;
                                 }
                                 break;
                             }
                             match key.code {
                                 KeyCode::Char('s') => {
-                                    sources = Some(SourceView::new(
+                                    view = View::Sources(SourceView::new(
                                         engine.services.clone(),
                                         engine.source,
                                     ))
@@ -294,7 +360,7 @@ pub fn run(
                                 KeyCode::Char('m') => engine.start_source("mixed"),
                                 KeyCode::Char('g') => {
                                     if engine.can_tune_wave() {
-                                        flow = Some(FlowView::new(
+                                        view = View::Flow(FlowView::new(
                                             engine.source,
                                             engine.name,
                                             engine.wave_style(),
@@ -306,7 +372,7 @@ pub fn run(
                                     }
                                 }
                                 KeyCode::Char('h' | '/') => {
-                                    history = Some(HistoryView::new(
+                                    view = View::History(HistoryView::new(
                                         engine
                                             .history
                                             .iter()
@@ -365,18 +431,24 @@ pub fn run(
                                 KeyCode::Char('d') => engine.dislike(),
                                 KeyCode::Char('u') => engine.undo_dislike(),
                                 KeyCode::Char('v') => {
-                                    wave = if wave.is_some() {
-                                        None
-                                    } else {
-                                        Some(Wave::default())
-                                    };
+                                    visual_enabled = !visual_enabled;
                                     controls.reset();
-                                    engine.message = if wave.is_some() {
-                                        "Wave visualization enabled"
-                                    } else {
-                                        "Wave visualization disabled"
-                                    }
-                                    .into();
+                                    engine.message = format!(
+                                        "{} visualization {}",
+                                        visual.mode.label(),
+                                        if visual_enabled {
+                                            "enabled"
+                                        } else {
+                                            "disabled"
+                                        }
+                                    );
+                                }
+                                KeyCode::Char('b') => {
+                                    visual.mode = visual.mode.toggle();
+                                    visual_enabled = true;
+                                    controls.reset();
+                                    engine.message =
+                                        format!("{} visualization enabled", visual.mode.label());
                                 }
                                 KeyCode::Char('w') => engine.start_mode(PlaybackMode::MyVibe),
                                 KeyCode::Char('f') => {
@@ -391,7 +463,6 @@ pub fn run(
                                 _ => continue,
                             }
                         }
-                        event::Event::Resize(_, _) => {}
                         _ => continue,
                     }
                 }
@@ -410,17 +481,18 @@ pub fn run(
             engine.end_scrub();
         }
         dirty |= engine.tick();
+        // UI/backend changes rebuild static content; the animation timer below
+        // only schedules a new composite of the cached layers.
+        if dirty {
+            scene = None;
+        }
         if (dirty || last_mpris.elapsed() >= Duration::from_millis(250))
             && let Some(mpris) = &mpris
         {
             mpris.update(&engine);
             last_mpris = Instant::now();
         }
-        if history.is_none()
-            && sources.is_none()
-            && flow.is_none()
-            && engine.track().is_some()
-            && (!engine.paused || engine.is_scrubbing())
+        if view.wants_frames(&engine, visual_enabled.then_some(&visual))
             && last_draw.elapsed() >= frame_interval
         {
             dirty = true;
@@ -435,24 +507,19 @@ pub fn run(
     Ok(())
 }
 
-fn draw(
-    frame: &mut Frame,
-    engine: &Engine,
-    wave: Option<&Wave>,
-    artwork: &mut Artwork,
-    controls: &mut Controls,
-    selection: &mut TextSelection,
-) {
-    controls.sync_track(engine);
-    controls.begin_draw();
-    let compact = frame.area().height < 20;
-    let width = frame.area().width.saturating_sub(6);
-    let favorites = engine.favorites_supported || engine.source == "mixed";
-    let quality = engine.quality().unwrap_or_default();
-    let volume = format!("Volume: {:.0}%", engine.volume * 100.0);
-    let speed = format!("Speed: {:.2}x", engine.speed);
-    let queue = format!(" · Queued: {}", engine.queue_len());
-    let state = if engine.is_scrubbing() {
+struct Scene {
+    frame: CachedFrame,
+    state: &'static str,
+    wave: Rect,
+    dance: Rect,
+    progress: Rect,
+    duration: Option<f64>,
+    seconds: Option<u64>,
+    progress_label: String,
+}
+
+fn playback_state(engine: &Engine) -> &'static str {
+    if engine.is_scrubbing() {
         "Scrubbing"
     } else if engine.loading {
         "Loading"
@@ -466,7 +533,78 @@ fn draw(
         "Playing"
     } else {
         "Stopped"
-    };
+    }
+}
+
+fn draw(
+    frame: &mut Frame,
+    engine: &Engine,
+    visual: Option<&Visualization>,
+    artwork: &mut Artwork,
+    controls: &mut Controls,
+    selection: &mut TextSelection,
+    scene: &mut Option<Scene>,
+) -> Option<Rect> {
+    let state = playback_state(engine);
+    if scene
+        .as_ref()
+        .is_none_or(|scene| scene.frame.area() != frame.area() || scene.state != state)
+    {
+        *scene = Some(build_scene(
+            frame, engine, visual, artwork, controls, selection, state,
+        ));
+        frame.buffer_mut().reset();
+    }
+    let scene = scene.as_mut().unwrap();
+    scene.frame.background(frame.buffer_mut());
+    if let Some(visual) = visual {
+        visual.render(scene.wave, scene.dance, frame.buffer_mut());
+    }
+    controls.highlight_transport(frame.buffer_mut());
+    scene.frame.foreground(frame.buffer_mut());
+    let seconds = controls.position(engine.seconds());
+    let whole_seconds = seconds.max(0.0) as u64;
+    if scene.seconds != Some(whole_seconds) {
+        scene.seconds = Some(whole_seconds);
+        scene.progress_label = format!(
+            "{} / {}",
+            clock(seconds),
+            scene.duration.map_or("—:—".into(), clock)
+        );
+    }
+    let ratio = scene
+        .duration
+        .filter(|d| *d > 0.0)
+        .map_or(0.0, |d| (seconds / d).clamp(0.0, 1.0));
+    overlay_progress(
+        ratio,
+        &scene.progress_label,
+        scene.progress,
+        frame.buffer_mut(),
+    );
+    visual
+        .filter(|visual| visual.mode == Mode::Dance && visual.renderer == Renderer::Sixel)
+        .map(|_| scene.dance)
+}
+
+fn build_scene(
+    frame: &mut Frame,
+    engine: &Engine,
+    visual: Option<&Visualization>,
+    artwork: &mut Artwork,
+    controls: &mut Controls,
+    selection: &mut TextSelection,
+    state: &'static str,
+) -> Scene {
+    controls.sync_track(engine);
+    controls.begin_draw();
+    let compact = frame.area().height < 20;
+    let width = frame.area().width.saturating_sub(6);
+    let favorites = engine.favorites_supported || engine.source == "mixed";
+    let quality = engine.quality().unwrap_or_default();
+    let volume = format!("Volume: {:.0}%", engine.volume * 100.0);
+    let speed = format!("Speed: {:.2}x", engine.speed);
+    let queue = format!(" · Queued: {}", engine.queue_len());
     let status = if selection.range().is_some() {
         format!("{state} · Ctrl+C copy · Esc clear")
     } else {
@@ -514,14 +652,14 @@ fn draw(
         .area()
         .height
         .saturating_sub(4 + detail_rows + progress_rows + control_rows);
-    let identity_rows = if wave.is_none() {
+    let identity_rows = if visual.is_none() {
         track_text.as_ref().map_or(0, |(key, text)| {
             selection.height(key, text, width, identity_limit)
         })
     } else {
         0
     };
-    let rows = Layout::vertical([if wave.is_some() {
+    let rows = Layout::vertical([if visual.is_some() {
         Constraint::Min(0)
     } else {
         Constraint::Length(2 + identity_rows + detail_rows + progress_rows + control_rows)
@@ -578,10 +716,19 @@ fn draw(
     let text_height = track_text.as_ref().map_or(0, |(key, text)| {
         selection.height(key, text, identity.width, identity.height)
     });
-    if let Some(wave) = wave {
+    let dance_top = (identity.y + text_height)
+        .max(frame.area().y + frame.area().height / 2 + 1)
+        .min(identity.bottom());
+    let dance_area = Rect::new(
+        identity.x,
+        dance_top,
+        identity.width,
+        identity.bottom().saturating_sub(dance_top),
+    );
+    if visual.is_some() {
         artwork.render(inner, frame.buffer_mut());
-        frame.render_widget(wave, details);
     }
+    let cached = CachedFrame::begin(frame.buffer_mut());
     controls.draw_transport(
         frame,
         inner,
@@ -647,23 +794,21 @@ fn draw(
             frame.buffer_mut(),
         );
     }
-    let seconds = controls.position(engine.seconds());
-    let duration = engine.track().and_then(|track| track.duration);
-    let ratio = duration
-        .filter(|d| *d > 0.0)
-        .map_or(0.0, |d| (seconds / d).clamp(0.0, 1.0));
-    overlay_progress(
-        ratio,
-        &format!(
-            "{} / {}",
-            clock(seconds),
-            duration.map_or("—:—".into(), clock)
-        ),
-        rows[1],
-        frame.buffer_mut(),
-    );
     controls.seek = rows[1];
-    controls.draw(frame, rows[2], engine, wave.is_some());
+    controls.draw(frame, rows[2], engine, visual.map(|visual| visual.mode));
+    let cached = cached.finish(frame.buffer_mut(), |buffer| {
+        controls.highlight_transport(buffer)
+    });
+    Scene {
+        frame: cached,
+        state,
+        wave: details,
+        dance: dance_area,
+        progress: rows[1],
+        duration: engine.track().and_then(|track| track.duration),
+        seconds: None,
+        progress_label: String::new(),
+    }
 }
 
 fn overlay_progress(ratio: f64, label: &str, area: Rect, buffer: &mut Buffer) {

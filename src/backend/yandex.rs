@@ -1,8 +1,9 @@
+use super::yandex_cache::{Cache, now};
 use super::{Backend, Feedback, Input, PlaybackMode, Track, WaveStyle};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use hmac::{Hmac, Mac};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use std::{
@@ -22,6 +23,7 @@ pub struct Yandex {
     favorites: Option<(HashSet<String>, Instant)>,
     shuffle: Option<FavoritesQueue>,
     style: WaveStyle,
+    streams: Cache,
 }
 
 #[derive(Default)]
@@ -34,7 +36,12 @@ struct FavoritesQueue {
 const FAVORITES_BATCH: usize = 32;
 
 pub fn http() -> ureq::Agent {
+    http_agent(true)
+}
+
+fn http_agent(status_errors: bool) -> ureq::Agent {
     ureq::Agent::config_builder()
+        .http_status_as_error(status_errors)
         .timeout_connect(Some(Duration::from_secs(5)))
         .timeout_recv_response(Some(Duration::from_secs(10)))
         .timeout_recv_body(Some(Duration::from_secs(10)))
@@ -48,14 +55,47 @@ pub fn network_error(error: ureq::Error) -> anyhow::Error {
             anyhow!("Access denied: check your token and Yandex Plus subscription")
         }
         ureq::Error::StatusCode(code) => anyhow!("The server returned HTTP {code}"),
-        _ => anyhow!("Connection error or timeout"),
+        ureq::Error::Timeout(stage) => anyhow!("Request timed out during {stage}"),
+        ureq::Error::HostNotFound => anyhow!("DNS lookup failed"),
+        ureq::Error::Io(error) => match error.raw_os_error() {
+            Some(code) => anyhow!(
+                "Network I/O: {} (OS {code})",
+                std::io::Error::from_raw_os_error(code)
+            ),
+            None => anyhow!("Network I/O: {:?}", error.kind()),
+        },
+        ureq::Error::Rustls(error) => anyhow!("TLS: {error}"),
+        ureq::Error::Tls(_) | ureq::Error::TlsRequired => anyhow!("TLS connection failed"),
+        ureq::Error::InvalidProxyUrl => anyhow!("Invalid proxy configuration"),
+        ureq::Error::ConnectProxyFailed(_) => anyhow!("Proxy connection failed"),
+        ureq::Error::ConnectionFailed => anyhow!("Connection failed"),
+        ureq::Error::TooManyRedirects | ureq::Error::RedirectFailed => {
+            anyhow!("HTTP redirect failed")
+        }
+        ureq::Error::BadUri(_) | ureq::Error::RequireHttpsOnly(_) => anyhow!("Invalid request URL"),
+        ureq::Error::Protocol(_) | ureq::Error::BodyStalled => anyhow!("Invalid HTTP response"),
+        ureq::Error::Json(error) => anyhow!(
+            "Invalid JSON response at line {}, column {}",
+            error.line(),
+            error.column()
+        ),
+        ureq::Error::BodyExceedsLimit(_) => anyhow!("HTTP body exceeded the size limit"),
+        _ => anyhow!("HTTP request failed"),
     }
+}
+
+pub fn network_error_at(url: &str, error: ureq::Error) -> anyhow::Error {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown host".into());
+    anyhow!("{host}: {}", network_error(error))
 }
 
 impl Yandex {
     pub fn new(token: String) -> Self {
         Self {
-            http: http(),
+            http: http_agent(false),
             token,
             base: "https://api.music.yandex.net".into(),
             session: None,
@@ -63,33 +103,189 @@ impl Yandex {
             favorites: None,
             shuffle: None,
             style: WaveStyle::default(),
+            streams: Cache::default(),
         }
     }
 
-    fn request(&self, path: &str, body: Option<Value>) -> Result<Value> {
+    pub fn with_cache(token: String, directory: std::path::PathBuf) -> Self {
+        let streams = Cache::persistent(directory, &token);
+        Self {
+            streams,
+            ..Self::new(token)
+        }
+    }
+
+    fn api_response(
+        &mut self,
+        path: &str,
+        response: ureq::http::Response<ureq::Body>,
+    ) -> Result<ureq::http::Response<ureq::Body>> {
+        self.check_rate_limit(&response, false)?;
+        let status = response.status().as_u16();
+        if status >= 400 {
+            return Err(self.api_error(path, ureq::Error::StatusCode(status)));
+        }
+        Ok(response)
+    }
+
+    fn check_rate_limit(
+        &mut self,
+        response: &ureq::http::Response<ureq::Body>,
+        cdn: bool,
+    ) -> Result<()> {
+        if response.status().as_u16() == 429 {
+            let retry = response
+                .headers()
+                .get("retry-after")
+                .and_then(|h| h.to_str().ok());
+            return Err(if cdn {
+                self.streams.throttled_cdn(retry, now())
+            } else {
+                self.streams.throttled(retry, now())
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn api_error(&self, path: &str, error: ureq::Error) -> anyhow::Error {
+        let mut parts: Vec<_> = path.split('?').next().unwrap_or(path).split('/').collect();
+        if parts.get(1) == Some(&"users") && parts.len() > 2 {
+            parts[2] = "{user}";
+        } else if parts.get(1..3) == Some(&["rotor", "session"][..])
+            && parts.len() > 3
+            && parts[3] != "new"
+        {
+            parts[3] = "{session}";
+        }
+        anyhow!(
+            "Yandex {}: {}",
+            parts.join("/"),
+            network_error_at(&self.base, error)
+        )
+    }
+
+    pub fn diagnose(&mut self) -> Value {
+        let mut checks = Vec::new();
+        let mut stage = "account";
+        let mut started = Instant::now();
+        let result = (|| -> Result<()> {
+            self.ensure_uid()?;
+            checks.push(
+                json!({"stage": stage, "ok": true, "elapsed_ms": started.elapsed().as_millis()}),
+            );
+            stage = "favorites";
+            started = Instant::now();
+            self.refresh_favorites(true)?;
+            checks.push(
+                json!({"stage": stage, "ok": true, "elapsed_ms": started.elapsed().as_millis()}),
+            );
+            let Some(id) = self.favorites.as_ref().unwrap().0.iter().min().cloned() else {
+                checks.push(json!({"stage": "audio", "skipped": "No favorite tracks to probe"}));
+                return Ok(());
+            };
+            stage = "track_metadata";
+            started = Instant::now();
+            let value = self.post_form("/tracks", [("track-ids", id.as_str())])?;
+            let track =
+                parse_track(&value[0], "")?.context("The selected favorite is unavailable")?;
+            checks.push(
+                json!({"stage": stage, "ok": true, "elapsed_ms": started.elapsed().as_millis()}),
+            );
+            stage = "audio_resolution";
+            started = Instant::now();
+            let Input::Http { url, quality, .. } = self.resolve(&track)? else {
+                bail!("Unexpected audio transport");
+            };
+            checks.push(json!({"stage": stage, "ok": true, "quality": quality, "elapsed_ms": started.elapsed().as_millis()}));
+            stage = "audio_cdn";
+            started = Instant::now();
+            let host = url::Url::parse(&url)?
+                .host_str()
+                .unwrap_or_default()
+                .to_owned();
+            let mut response = self
+                .http
+                .get(&url)
+                .header("Range", "bytes=0-1023")
+                .call()
+                .map_err(|error| network_error_at(&url, error))?;
+            let status = response.status().as_u16();
+            self.check_rate_limit(&response, true)?;
+            ensure!(
+                status == 206,
+                "Audio CDN {host}: HTTP {status}; expected a partial response"
+            );
+            let bytes = response
+                .body_mut()
+                .with_config()
+                .limit(1025)
+                .read_to_vec()
+                .map_err(|error| network_error_at(&url, error))?;
+            ensure!(
+                !bytes.is_empty() && bytes.len() <= 1024,
+                "Audio CDN {host}: invalid response size"
+            );
+            checks.push(
+                json!({"stage": stage, "host": host, "ok": true, "http_status": status,
+                "bytes_read": bytes.len(), "elapsed_ms": started.elapsed().as_millis()}),
+            );
+            Ok(())
+        })();
+        if let Err(error) = result {
+            checks.push(json!({"stage": stage, "ok": false, "error": format!("{error:#}"), "elapsed_ms": started.elapsed().as_millis()}));
+        }
+        json!({"source": "yandex", "proxy_configured": self.http.config().proxy().is_some(), "checks": checks})
+    }
+
+    fn request(&mut self, path: &str, body: Option<Value>) -> Result<Value> {
+        self.streams.guard(now())?;
         let url = format!("{}{path}", self.base);
         let auth = format!("OAuth {}", self.token);
-        let mut response = match body {
+        let response = match body {
             Some(body) => self
                 .http
                 .post(&url)
                 .header("Authorization", &auth)
                 .send_json(body),
             None => self.http.get(&url).header("Authorization", &auth).call(),
-        }
-        .map_err(network_error)?;
-        let value: Value = response
+        };
+        self.decode_result(path, response)
+    }
+
+    fn post_form<'a>(
+        &mut self,
+        path: &str,
+        fields: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Value> {
+        self.streams.guard(now())?;
+        let response = self
+            .http
+            .post(&format!("{}{path}", self.base))
+            .header("Authorization", format!("OAuth {}", self.token))
+            .send_form(fields);
+        self.decode_result(path, response)
+    }
+
+    fn decode_result(
+        &mut self,
+        path: &str,
+        response: std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> Result<Value> {
+        let response = response.map_err(|error| self.api_error(path, error))?;
+        let mut response = self.api_response(path, response)?;
+        let mut value: Value = response
             .body_mut()
             .read_json()
-            .context("Invalid API response")?;
+            .map_err(|error| self.api_error(path, error))?;
         ensure!(value.get("error").is_none(), "The API reported an error");
         value
-            .get("result")
-            .cloned()
+            .get_mut("result")
+            .map(Value::take)
             .context("The API response is missing result")
     }
 
-    fn send_event(&self, batch: &str, mut event: Value) -> Result<()> {
+    fn send_event(&mut self, batch: &str, mut event: Value) -> Result<()> {
         let session = self
             .session
             .as_ref()
@@ -187,21 +383,8 @@ impl Yandex {
                 .collect();
             let mut fields: Vec<_> = ids.iter().map(|id| ("track-ids", id.as_str())).collect();
             fields.push(("with-positions", "True"));
-            let mut response = self
-                .http
-                .post(&format!("{}/tracks", self.base))
-                .header("Authorization", &format!("OAuth {}", self.token))
-                .send_form(fields)
-                .map_err(network_error)?;
-            let value: Value = response
-                .body_mut()
-                .read_json()
-                .context("Invalid track metadata response")?;
-            ensure!(
-                value.get("error").is_none(),
-                "The API reported a track metadata error"
-            );
-            let values = value["result"]
+            let value = self.post_form("/tracks", fields)?;
+            let values = value
                 .as_array()
                 .context("The API did not return track metadata")?;
             let mut tracks = HashMap::new();
@@ -325,9 +508,36 @@ impl Backend for Yandex {
     }
 
     fn resolve(&mut self, track: &Track) -> Result<Input> {
+        if let Some(info) = self.streams.get(&track.id, now()) {
+            if let Ok(input) = info.clone().into_input() {
+                self.streams.guard_cdn(now())?;
+                let mut response = self
+                    .http
+                    .get(&info.url)
+                    .header("Range", "bytes=0-0")
+                    .call()
+                    .map_err(|error| network_error_at(&info.url, error))?;
+                let status = response.status().as_u16();
+                self.check_rate_limit(&response, true)?;
+                match status {
+                    200 | 206 => {
+                        response
+                            .body_mut()
+                            .as_reader()
+                            .read_exact(&mut [0u8; 1])
+                            .map_err(|error| network_error_at(&info.url, error.into()))?;
+                        return Ok(input);
+                    }
+                    401 | 403 | 404 | 410 => {}
+                    _ => return Err(network_error_at(&info.url, ureq::Error::StatusCode(status))),
+                }
+            }
+            self.streams.remove(&track.id);
+        }
+        self.streams.guard(now())?;
         let timestamp = OffsetDateTime::now_utc().unix_timestamp();
         let sign = file_info_sign(&track.id, timestamp);
-        let mut response = self
+        let response = self
             .http
             .get(&format!("{}/get-file-info", self.base))
             .header("Authorization", &format!("OAuth {}", self.token))
@@ -337,23 +547,17 @@ impl Backend for Yandex {
             )
             .query("ts", timestamp.to_string())
             .query("trackId", &track.id)
-            .query("quality", "lossless")
+            .query("quality", FILE_QUALITY)
             .query("codecs", FILE_CODECS)
-            .query("transports", "encraw")
+            .query("transports", FILE_TRANSPORTS)
             .query("sign", sign)
-            .call()
-            .map_err(network_error)?;
-        let value: Value = response
-            .body_mut()
-            .read_json()
-            .context("Invalid API response")?;
-        ensure!(
-            value.get("error").is_none(),
-            "The API reported an audio quality error"
-        );
-        let info: FileDownload = serde_json::from_value(value["result"]["downloadInfo"].clone())
+            .call();
+        let value = self.decode_result("/get-file-info", response)?;
+        let info: FileDownload = serde_json::from_value(value["downloadInfo"].clone())
             .context("The API did not return audio stream information")?;
-        info.into_input()
+        let input = info.clone().into_input()?;
+        self.streams.insert(&track.id, info, now());
+        Ok(input)
     }
 
     fn feedback(&mut self, track: &Track, kind: Feedback, seconds: f64) -> Result<()> {
@@ -379,22 +583,15 @@ impl Backend for Yandex {
     fn set_dislike(&mut self, track: &Track, disliked: bool) -> Result<bool> {
         self.ensure_uid()?;
         let action = if disliked { "add-multiple" } else { "remove" };
-        let mut response = self
-            .http
-            .post(&format!(
-                "{}/users/{}/dislikes/tracks/{action}",
-                self.base,
+        let value = self.post_form(
+            &format!(
+                "/users/{}/dislikes/tracks/{action}",
                 self.uid.as_ref().unwrap()
-            ))
-            .header("Authorization", format!("OAuth {}", self.token))
-            .send_form([("track-ids", track.id.as_str())])
-            .map_err(network_error)?;
-        let value: Value = response
-            .body_mut()
-            .read_json()
-            .context("Invalid API response")?;
+            ),
+            [("track-ids", track.id.as_str())],
+        )?;
         ensure!(
-            value.get("error").is_none() && value["result"]["revision"].as_u64().is_some(),
+            value["revision"].as_u64().is_some(),
             "The API did not confirm the dislike change"
         );
         Ok(true)
@@ -413,22 +610,15 @@ impl Backend for Yandex {
         let liked = !self.favorites.as_ref().unwrap().0.contains(&track.id);
         let action = if liked { "add-multiple" } else { "remove" };
         let result = (|| -> Result<()> {
-            let mut response = self
-                .http
-                .post(&format!(
-                    "{}/users/{}/likes/tracks/{action}",
-                    self.base,
+            let value = self.post_form(
+                &format!(
+                    "/users/{}/likes/tracks/{action}",
                     self.uid.as_ref().unwrap()
-                ))
-                .header("Authorization", &format!("OAuth {}", self.token))
-                .send_form([("track-ids", track.id.as_str())])
-                .map_err(network_error)?;
-            let value: Value = response
-                .body_mut()
-                .read_json()
-                .context("Invalid API response")?;
+                ),
+                [("track-ids", track.id.as_str())],
+            )?;
             ensure!(
-                value.get("error").is_none() && value["result"]["revision"].as_u64().is_some(),
+                value["revision"].as_u64().is_some(),
                 "The API did not confirm the favorites change"
             );
             Ok(())
@@ -451,7 +641,9 @@ impl Backend for Yandex {
 }
 
 // Only advertise formats supported by the decoder. The server selects the best available quality.
-const FILE_CODECS: &str = "flac,flac-mp4,aac-mp4,mp3";
+pub(super) const FILE_QUALITY: &str = "lossless";
+pub(super) const FILE_TRANSPORTS: &str = "encraw";
+pub(super) const FILE_CODECS: &str = "flac,flac-mp4,aac-mp4,mp3";
 
 fn file_info_sign(track_id: &str, timestamp: i64) -> String {
     let mut mac = Hmac::<Sha256>::new_from_slice(b"kzqU4XhfCaY6B6JTHODeq5").unwrap();
@@ -465,8 +657,8 @@ fn file_info_sign(track_id: &str, timestamp: i64) -> String {
     STANDARD_NO_PAD.encode(mac.finalize().into_bytes())
 }
 
-#[derive(Deserialize)]
-struct FileDownload {
+#[derive(Clone, Deserialize, Serialize)]
+pub(super) struct FileDownload {
     codec: String,
     quality: String,
     bitrate: u32,
@@ -573,6 +765,10 @@ fn parse_track(track: &Value, batch: &str) -> Result<Option<Track>> {
             .unwrap_or_default(),
         duration: track["durationMs"].as_f64().map(|ms| ms / 1000.0),
         cover_url: cover_url(track),
+        genre: track["albums"]
+            .as_array()
+            .and_then(|albums| albums.iter().find_map(|album| album["genre"].as_str()))
+            .map(str::to_owned),
         batch: batch.into(),
     }))
 }
@@ -632,6 +828,401 @@ fn cover_url(track: &Value) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn stream_server(
+        replies: Vec<(&'static str, u16)>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::{
+            io::{BufRead, Write},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let audio_url = format!("{base}/audio?sign=private-fixture");
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for (path, status) in replies {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(2))
+                        }
+                        Err(error) => panic!("Missing request: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                assert!(
+                    request.starts_with(&format!("GET {path}")),
+                    "Unexpected request endpoint"
+                );
+                let mut headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    assert!(!line.is_empty());
+                    headers.push_str(&line.to_ascii_lowercase());
+                }
+                if path == "/audio" {
+                    assert!(headers.contains("range: bytes=0-0"));
+                    assert!(!headers.contains("authorization:"));
+                } else {
+                    assert!(headers.contains("authorization: oauth test-token"));
+                    assert!(request.contains("quality=lossless"));
+                }
+                requests.push(request);
+                let body = if path == "/get-file-info?" && status == 200 {
+                    json!({"result":{"downloadInfo":{"codec":"flac-mp4","quality":"lossless","bitrate":0,
+                        "transport":"encraw","url":audio_url,"key":"000102030405060708090a0b0c0d0e0f"}}}).to_string()
+                } else {
+                    "x".into()
+                };
+                write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nRetry-After: 120\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            requests
+        });
+        (base, server)
+    }
+
+    fn stream_track() -> Track {
+        parse_track(&json!({"id":12,"title":"Fixture"}), "batch")
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn album_genre_survives_history_and_old_records_remain_readable() {
+        let track = parse_track(
+            &json!({"id":12,"title":"Fixture",
+            "albums":[{"genre":"ambientgenre"}]}),
+            "batch",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(track.genre.as_deref(), Some("ambientgenre"));
+        let mut saved = serde_json::to_value(track).unwrap();
+        let restored: Track = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(restored.genre.as_deref(), Some("ambientgenre"));
+        saved.as_object_mut().unwrap().remove("genre");
+        let legacy: Track = serde_json::from_value(saved).unwrap();
+        assert_eq!(legacy.genre, None);
+    }
+
+    #[test]
+    fn signed_stream_cache_reuses_metadata_across_restarts_and_refreshes_an_expired_url_once() {
+        let directory =
+            std::env::temp_dir().join(format!("plavno-stream-reuse-{}", std::process::id()));
+        let (base, server) = stream_server(vec![
+            ("/get-file-info?", 200),
+            ("/audio", 206),
+            ("/audio", 403),
+            ("/get-file-info?", 200),
+        ]);
+        let mut backend = Yandex::with_cache("test-token".into(), directory.clone());
+        backend.base = base.clone();
+        let track = stream_track();
+        assert!(matches!(
+            backend.resolve(&track).unwrap(),
+            Input::Http {
+                aes128_key: Some(_),
+                ..
+            }
+        ));
+        drop(backend);
+        let mut restarted = Yandex::with_cache("test-token".into(), directory.clone());
+        restarted.base = base;
+        let mut new_batch = track.clone();
+        new_batch.batch = "new-session".into();
+        assert!(restarted.resolve(&new_batch).is_ok());
+        assert!(restarted.resolve(&new_batch).is_ok());
+        let requests = server.join().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.starts_with("GET /get-file-info?"))
+                .count(),
+            2
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn expired_metadata_uses_a_fresh_resolution_without_probing_the_old_url() {
+        let (base, server) =
+            stream_server(vec![("/get-file-info?", 200), ("/get-file-info?", 200)]);
+        let mut backend = Yandex::new("test-token".into());
+        backend.base = base;
+        let track = stream_track();
+        backend.resolve(&track).unwrap();
+        let info = backend.streams.get(&track.id, now()).unwrap();
+        backend.streams.insert(&track.id, info, now() - 301);
+        backend.resolve(&track).unwrap();
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn http_429_blocks_api_calls_across_restarts_and_resumes_after_the_deadline() {
+        let directory =
+            std::env::temp_dir().join(format!("plavno-stream-quota-{}", std::process::id()));
+        let (base, server) =
+            stream_server(vec![("/get-file-info?", 429), ("/get-file-info?", 200)]);
+        let mut backend = Yandex::with_cache("test-token".into(), directory.clone());
+        backend.base = base.clone();
+        let track = stream_track();
+        let error = backend.resolve(&track).err().unwrap();
+        assert!(
+            error
+                .downcast_ref::<super::super::RateLimited>()
+                .unwrap()
+                .active()
+        );
+        assert!(
+            backend
+                .resolve(&track)
+                .err()
+                .unwrap()
+                .downcast_ref::<super::super::RateLimited>()
+                .is_some()
+        );
+        assert!(
+            backend
+                .request("/account/status", None)
+                .err()
+                .unwrap()
+                .downcast_ref::<super::super::RateLimited>()
+                .is_some()
+        );
+        drop(backend);
+        let mut restarted = Yandex::with_cache("test-token".into(), directory.clone());
+        restarted.base = base.clone();
+        assert!(
+            restarted
+                .resolve(&track)
+                .err()
+                .unwrap()
+                .downcast_ref::<super::super::RateLimited>()
+                .is_some()
+        );
+        // Advance the persisted deadline without sleeping on the wall clock.
+        let path = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let mut state: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        state["blocked_until"] = json!(now() - 1);
+        crate::config::save_private(&path, &serde_json::to_vec(&state).unwrap()).unwrap();
+        restarted = Yandex::with_cache("test-token".into(), directory.clone());
+        restarted.base = base;
+        assert!(restarted.resolve(&track).is_ok());
+        assert_eq!(server.join().unwrap().len(), 2);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn api_cooldown_allows_cached_cdn_streams_but_blocks_expired_links_and_form_requests() {
+        let directory =
+            std::env::temp_dir().join(format!("plavno-cached-cooldown-{}", std::process::id()));
+        let (base, server) = stream_server(vec![
+            ("/get-file-info?", 200),
+            ("/audio", 206),
+            ("/audio", 403),
+        ]);
+        let track = stream_track();
+        let mut backend = Yandex::with_cache("test-token".into(), directory.clone());
+        backend.base = base.clone();
+        backend.resolve(&track).unwrap();
+        backend.streams.throttled(Some("120"), now());
+        drop(backend);
+        let mut restarted = Yandex::with_cache("test-token".into(), directory.clone());
+        restarted.base = base;
+        assert!(restarted.resolve(&track).is_ok());
+        assert!(
+            restarted
+                .post_form("/tracks", [("track-ids", "12")])
+                .unwrap_err()
+                .is::<super::super::RateLimited>()
+        );
+        assert!(
+            restarted
+                .resolve(&track)
+                .err()
+                .unwrap()
+                .is::<super::super::RateLimited>()
+        );
+        assert_eq!(server.join().unwrap().len(), 3);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cdn_cooldown_does_not_repeat_the_probe_or_resolve_a_new_link() {
+        let directory =
+            std::env::temp_dir().join(format!("plavno-cdn-cooldown-{}", std::process::id()));
+        let (base, server) = stream_server(vec![("/get-file-info?", 200), ("/audio", 429)]);
+        let mut backend = Yandex::with_cache("test-token".into(), directory.clone());
+        backend.base = base.clone();
+        let track = stream_track();
+        backend.resolve(&track).unwrap();
+        // This instance already holds the signed URL when the first one is throttled.
+        let mut existing = Yandex::with_cache("test-token".into(), directory.clone());
+        existing.base = base;
+        assert!(
+            backend
+                .resolve(&track)
+                .err()
+                .unwrap()
+                .is::<super::super::RateLimited>()
+        );
+        for instance in [&mut backend, &mut existing] {
+            assert!(
+                instance
+                    .resolve(&track)
+                    .err()
+                    .unwrap()
+                    .is::<super::super::RateLimited>()
+            );
+        }
+        assert_eq!(server.join().unwrap().len(), 2);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn transport_errors_identify_the_cause_without_exposing_secrets() {
+        let url = "https://user:secret@example.test/signed-secret?token=secret";
+        for error in [
+            ureq::Error::BadUri(url.into()),
+            ureq::Error::ConnectProxyFailed(url.into()),
+            ureq::Error::Io(std::io::Error::other(url.to_owned())),
+        ] {
+            let message = network_error_at(url, error).to_string();
+            assert!(message.contains("example.test"));
+            assert!(!message.contains("secret"));
+        }
+        assert!(
+            network_error(ureq::Error::HostNotFound)
+                .to_string()
+                .contains("DNS")
+        );
+        assert!(
+            network_error(ureq::Error::Timeout(ureq::Timeout::RecvResponse))
+                .to_string()
+                .contains("receive response")
+        );
+        let backend = Yandex::new("secret".into());
+        let error = backend.api_error(
+            "/rotor/session/secret/tracks?token=secret",
+            ureq::Error::HostNotFound,
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("/rotor/session/{session}/tracks")
+        );
+        assert!(!error.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn diagnosis_reports_completed_stages_and_handles_an_empty_library() {
+        let (mut backend, server) = mock_api(vec![
+            ("GET /account/status", json!({"account":{"uid":123}})),
+            (
+                "GET /users/123/likes/tracks?if-modified-since-revision=0",
+                library(std::iter::empty()),
+            ),
+        ]);
+        let report = backend.diagnose();
+        assert_eq!(report["checks"][0]["ok"], true);
+        assert_eq!(report["checks"][1]["ok"], true);
+        assert!(report["checks"][2]["skipped"].is_string());
+        assert_eq!(server.join().unwrap().len(), 2);
+        let (mut backend, server) = mock_api(vec![
+            ("GET /account/status", json!({"account":{"uid":123}})),
+            (
+                "GET /users/123/likes/tracks?if-modified-since-revision=0",
+                json!({}),
+            ),
+        ]);
+        let report = backend.diagnose();
+        assert_eq!(report["checks"][0]["ok"], true);
+        assert_eq!(report["checks"][1]["stage"], "favorites");
+        assert_eq!(report["checks"][1]["ok"], false);
+        assert!(!report.to_string().contains("test-token"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn diagnosis_downloads_a_bounded_fragment_without_sending_credentials_to_cdn() {
+        use std::{
+            io::{BufRead, Write},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/signed-secret?token=secret",
+            listener.local_addr().unwrap()
+        );
+        let cdn = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                assert!(!line.is_empty());
+                headers.push_str(&line.to_ascii_lowercase());
+            }
+            assert!(headers.contains("range: bytes=0-1023"));
+            assert!(!headers.contains("authorization:"));
+            write!(stream, "HTTP/1.1 206 Partial Content\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n{}", "a".repeat(1024)).unwrap();
+        });
+        let (mut backend, server) = mock_api(vec![
+            ("GET /account/status", json!({"account":{"uid":123}})),
+            (
+                "GET /users/123/likes/tracks?if-modified-since-revision=0",
+                library([12].into_iter()),
+            ),
+            ("POST /tracks", metadata([12].into_iter())),
+            (
+                "GET /get-file-info?",
+                json!({"downloadInfo":{"codec":"mp3", "quality":"high", "bitrate":320, "transport":"raw", "url":url}}),
+            ),
+        ]);
+        let report = backend.diagnose();
+        assert_eq!(report["checks"].as_array().unwrap().len(), 5);
+        assert!(
+            report["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|check| check["ok"] == true),
+            "{report}"
+        );
+        assert_eq!(report["checks"][4]["bytes_read"], 1024);
+        assert!(!report.to_string().contains("secret"));
+        assert!(!report.to_string().contains("test-token"));
+        assert_eq!(server.join().unwrap().len(), 4);
+        cdn.join().unwrap();
+    }
+
     #[test]
     fn wave_styles_send_session_seeds_instead_of_changing_playback_speed() {
         let mut replies = Vec::new();
@@ -681,7 +1272,11 @@ mod tests {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
-                assert_eq!(line, format!("{request} HTTP/1.1\r\n"));
+                if request.ends_with('?') {
+                    assert!(line.starts_with(request), "Unexpected request path");
+                } else {
+                    assert_eq!(line, format!("{request} HTTP/1.1\r\n"));
+                }
                 let mut headers = String::new();
                 loop {
                     line.clear();
@@ -757,6 +1352,7 @@ mod tests {
             artist: String::new(),
             duration: None,
             cover_url: None,
+            genre: None,
             batch: String::new(),
         };
         assert!(backend.set_dislike(&track, true).unwrap());
@@ -1093,6 +1689,7 @@ mod tests {
             artist: String::new(),
             duration: None,
             cover_url: None,
+            genre: None,
             batch: String::new(),
         };
         assert_eq!(backend.favorite_state(&track).unwrap(), Some(true));
@@ -1185,6 +1782,7 @@ mod tests {
             artist: String::new(),
             duration: None,
             cover_url: None,
+            genre: None,
             batch: String::new(),
         };
         let result = backend.resolve(&track);
@@ -1315,6 +1913,7 @@ mod tests {
             artist: String::new(),
             duration: None,
             cover_url: None,
+            genre: None,
             batch: String::new(),
         };
         for kind in [Feedback::Started, Feedback::Finished, Feedback::Skipped] {

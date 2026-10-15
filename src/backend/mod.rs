@@ -1,18 +1,22 @@
 mod bridge;
 mod local;
 mod multi;
+mod rate_limit;
 mod soundcloud;
 mod vk;
 pub(crate) mod web;
 mod yandex;
+mod yandex_cache;
 
 pub use bridge::Bridge;
 pub use local::Local;
 pub use multi::Multi;
+pub use rate_limit::RateLimited;
 pub use soundcloud::SoundCloud;
 pub use vk::Vk;
 pub use yandex::Yandex;
 pub use yandex::http as yandex_http;
+pub use yandex::network_error_at;
 
 use anyhow::Result;
 use std::path::PathBuf;
@@ -27,6 +31,8 @@ pub struct Track {
     pub duration: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub genre: Option<String>,
     #[serde(skip)]
     pub batch: String,
 }

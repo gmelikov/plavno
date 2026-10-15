@@ -26,6 +26,7 @@ impl Backend for Local {
             artist: String::new(),
             duration: None,
             cover_url: None,
+            genre: None,
             batch: String::new(),
         }])
     }

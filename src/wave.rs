@@ -72,9 +72,9 @@ impl Wave {
     }
 }
 
-fn dot(layer: &mut [u8], width: usize, x: usize, y: usize) {
+fn dot(column: &mut [[u8; 3]], layer: usize, x: usize, y: usize) {
     const BITS: [[u8; 2]; 4] = [[1, 8], [2, 16], [4, 32], [64, 128]];
-    layer[(y / 4) * width + x / 2] |= BITS[y % 4][x % 2];
+    column[y / 4][layer] |= BITS[y % 4][x % 2];
 }
 
 impl Widget for &Wave {
@@ -89,29 +89,6 @@ impl Widget for &Wave {
         let center = (pixels.1 - 1) as f32 / 2.0;
         let amplitude = (self.rms * 0.50 + self.bass * 0.20 + self.pulse * 0.35).min(0.94);
         let detail = ((self.peak - self.rms * 0.8).max(0.0) * 0.55 + self.pulse * 0.45).min(1.0);
-        let mut layers: [Vec<u8>; 3] = std::array::from_fn(|_| vec![0; width * height]);
-        for (index, layer) in layers.iter_mut().enumerate() {
-            let mut previous = center as usize;
-            for x in 0..pixels.0 {
-                let position = x as f32 / (pixels.0 - 1) as f32;
-                let envelope = (std::f32::consts::PI * position).sin().max(0.0).sqrt();
-                let phase = self.phase - index as f32 * 0.5;
-                let angle = position * std::f32::consts::TAU;
-                let signal = (angle * 2.4 - phase).sin() * 0.56
-                    + (angle * 4.8 + phase * 1.3).sin() * 0.22
-                    + (angle * 1.2 - phase * 0.7).sin() * 0.12
-                    + (angle * 9.6 - phase * 2.1).sin() * detail * 0.14
-                    + (angle * 14.4 + phase * 2.7).sin() * self.pulse * 0.10;
-                let scale = [1.0, 0.78, 0.55][index];
-                let y = (center + signal * center * amplitude * envelope * scale)
-                    .round()
-                    .clamp(0.0, (pixels.1 - 1) as f32) as usize;
-                for point in previous.min(y)..=previous.max(y) {
-                    dot(layer, width, x, point);
-                }
-                previous = y;
-            }
-        }
         let pulse = self.pulse;
         let brightness = 0.55 + self.peak * 0.45;
         let colors = if self.active {
@@ -127,17 +104,47 @@ impl Widget for &Wave {
         } else {
             [Color::Cyan, Color::DarkGray, Color::DarkGray]
         };
-        for y in 0..height {
-            for x in 0..width {
-                let index = y * width + x;
-                let mask = layers[0][index] | layers[1][index] | layers[2][index];
-                if mask == 0 {
-                    continue;
+        // Rasterize one terminal column at a time. Only touched rows need
+        // compositing, and the envelope is shared by all three curves.
+        let mut column = vec![[0_u8; 3]; height];
+        let mut previous = [center as usize; 3];
+        for x in 0..width {
+            let (mut first, mut last) = (height, 0);
+            for dx in 0..2 {
+                let pixel_x = x * 2 + dx;
+                let position = pixel_x as f32 / (pixels.0 - 1) as f32;
+                let envelope = (std::f32::consts::PI * position).sin().max(0.0).sqrt();
+                let angle = position * std::f32::consts::TAU;
+                for (index, previous) in previous.iter_mut().enumerate() {
+                    let phase = self.phase - index as f32 * 0.5;
+                    let signal = (angle * 2.4 - phase).sin() * 0.56
+                        + (angle * 4.8 + phase * 1.3).sin() * 0.22
+                        + (angle * 1.2 - phase * 0.7).sin() * 0.12
+                        + (angle * 9.6 - phase * 2.1).sin() * detail * 0.14
+                        + (angle * 14.4 + phase * 2.7).sin() * self.pulse * 0.10;
+                    let scale = [1.0, 0.78, 0.55][index];
+                    let y = (center + signal * center * amplitude * envelope * scale)
+                        .round()
+                        .clamp(0.0, (pixels.1 - 1) as f32) as usize;
+                    let low = (*previous).min(y);
+                    let high = (*previous).max(y);
+                    first = first.min(low / 4);
+                    last = last.max(high / 4);
+                    for point in low..=high {
+                        dot(&mut column, index, dx, point);
+                    }
+                    *previous = y;
                 }
-                let color = (0..3).find(|&layer| layers[layer][index] != 0).unwrap();
-                buffer[(inner.x + x as u16, inner.y + y as u16)]
-                    .set_char(char::from_u32(0x2800 + u32::from(mask)).unwrap())
-                    .set_fg(colors[color]);
+            }
+            for (y, layers) in column.iter_mut().enumerate().take(last + 1).skip(first) {
+                let mask = layers[0] | layers[1] | layers[2];
+                if mask != 0 {
+                    let color = layers.iter().position(|&layer| layer != 0).unwrap();
+                    buffer[(inner.x + x as u16, inner.y + y as u16)]
+                        .set_char(char::from_u32(0x2800 + u32::from(mask)).unwrap())
+                        .set_fg(colors[color]);
+                }
+                *layers = [0; 3];
             }
         }
     }

@@ -25,7 +25,14 @@ impl Drop for Fixture {
 
 fn read_until(master: &mut File, output: &mut Vec<u8>, done: impl Fn(&[u8]) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !done(output) {
+    // A PTY read may end inside a synchronized repaint, after the old screen
+    // was cleared. Evaluate the screen only after that frame has finished.
+    let unfinished_frame = |bytes: &[u8]| {
+        let begin = bytes.windows(8).rposition(|chunk| chunk == b"\x1b[?2026h");
+        let end = bytes.windows(8).rposition(|chunk| chunk == b"\x1b[?2026l");
+        begin.is_some_and(|begin| end.is_none_or(|end| end < begin))
+    };
+    while unfinished_frame(output) || !done(output) {
         let mut bytes = [0; 8192];
         let requests = output.windows(4).filter(|w| *w == b"\x1b[6n").count();
         match master.read(&mut bytes) {
@@ -47,7 +54,7 @@ fn read_until(master: &mut File, output: &mut Vec<u8>, done: impl Fn(&[u8]) -> b
 }
 
 fn screen_text(bytes: &[u8]) -> String {
-    let mut cells = vec![vec![' '; 80]; 24];
+    let mut cells = vec![vec![' '; 80]; 48];
     let (mut x, mut y) = (0usize, 0usize);
     let text = String::from_utf8_lossy(bytes);
     let mut chars = text.chars();
@@ -88,7 +95,7 @@ fn screen_text(bytes: &[u8]) -> String {
                         params.push(end);
                     }
                 }
-                Some(']') => {
+                Some(']' | 'P') => {
                     while let Some(ch) = chars.next() {
                         if ch == '\x07' || ch == '\x1b' && chars.next() == Some('\\') {
                             break;
@@ -162,11 +169,20 @@ fn spawn_player_with_state(args: &[&str], state: Option<&Path>) -> (Fixture, Fil
     fs::write(&alsa, "pcm.!default { type null }\n").unwrap();
     let mut master_fd = -1;
     let mut slave_fd = -1;
+    let rows = if args.contains(&"--dance") || args.contains(&"--dance-style") {
+        40
+    } else {
+        24
+    };
     let size = libc::winsize {
-        ws_row: 24,
+        ws_row: rows,
         ws_col: 80,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
+        ws_xpixel: if args.contains(&"sixel") { 640 } else { 0 },
+        ws_ypixel: if args.contains(&"sixel") {
+            rows * 16
+        } else {
+            0
+        },
     };
     assert_eq!(
         unsafe {
@@ -406,6 +422,228 @@ fn tui_dislike_and_undo_update_private_persistent_state() {
                 .is_ok_and(|value| value.as_array().is_some_and(|entries| entries.is_empty()))
         })
     });
+}
+
+#[test]
+fn tui_dancer_switches_with_mouse_remembers_its_mode_and_preserves_track_controls() {
+    let (_fixture, mut master) = spawn_player(&["--dance-style", "flow", "--renderer", "braille"]);
+    let mut output = Vec::new();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        screen.contains("tone") && has_wave(&screen) && screen.contains("b Dance")
+    });
+    let screen = screen_text(&output);
+    assert!(has_wave(&screen));
+    assert!(
+        screen.lines().take(21).any(has_wave),
+        "Wave disappeared in dance mode"
+    );
+    // Capture a developed waveform, rather than the flat startup frame.
+    read_until(&mut master, &mut output, |bytes| {
+        screen_text(bytes)
+            .lines()
+            .take(21)
+            .filter(|line| has_wave(line))
+            .count()
+            >= 3
+    });
+    master.write_all(b" ").unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        screen_text(bytes).contains("Paused")
+    });
+    let dots = |bytes: &[u8]| {
+        screen_text(bytes)
+            .lines()
+            .enumerate()
+            .flat_map(|(y, line)| {
+                line.chars().enumerate().filter_map(move |(x, ch)| {
+                    ('\u{2800}'..='\u{28ff}')
+                        .contains(&ch)
+                        .then_some((x, y, ch))
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let frozen = dots(&output);
+    click_label(&mut master, &mut output, "b Dance");
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        has_wave(&screen) && screen.contains("Wave visualization enabled")
+    });
+    master.write_all(b"b").unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        has_wave(&screen) && screen.contains("Dance visualization enabled")
+    });
+    assert_eq!(
+        dots(&output),
+        frozen,
+        "Switching modes reset the paused animation"
+    );
+    click_label(&mut master, &mut output, "v Visual");
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        !has_wave(&screen) && screen.contains("Dance visualization disabled")
+    });
+    master.write_all(b"v").unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        has_wave(&screen)
+            && screen.contains("Dance visualization enabled")
+            && screen.contains("Paused")
+    });
+    assert_eq!(
+        dots(&output),
+        frozen,
+        "Hiding visualization reset the paused animation"
+    );
+    master.write_all(b"\x1b[O-").unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        screen_text(bytes).contains("Volume: 95%")
+    });
+    let screen = screen_text(&output);
+    for label in ["tone", "x Stop", "←/→ Seek", "Speed: 1.00x", "q Quit"] {
+        assert!(screen.contains(label), "Dancer covered {label}");
+    }
+}
+
+#[test]
+fn tui_sixel_update_modes_preserve_menus_controls_and_resize() {
+    for update in ["full", "diff"] {
+        let (_fixture, mut master) = spawn_player(&[
+            "--dance-style",
+            "flow",
+            "--renderer",
+            "sixel",
+            "--sixel-update",
+            update,
+        ]);
+        let mut output = Vec::new();
+        let sixel = b"\x1bP7;1;0q";
+        let last_frame = |bytes: &[u8]| {
+            bytes
+                .windows(8)
+                .rposition(|chunk| chunk == b"\x1b[?2026h")
+                .unwrap_or(0)
+        };
+        read_until(&mut master, &mut output, |bytes| {
+            screen_text(bytes).contains("tone")
+                && bytes.windows(sixel.len()).any(|chunk| chunk == sixel)
+                && bytes.windows(8).any(|chunk| chunk == b"\x1b[?2026l")
+        });
+        assert!(output.windows(8).any(|chunk| chunk == b"\x1b[?2026h"));
+        let mut starts: Vec<_> = output
+            .windows(8)
+            .enumerate()
+            .filter_map(|(index, chunk)| (chunk == b"\x1b[?2026h").then_some(index))
+            .collect();
+        starts.push(output.len());
+        for range in starts.windows(2) {
+            let frame = &output[range[0]..range[1]];
+            assert!(
+                frame.windows(6).filter(|chunk| *chunk == b"plavno").count() <= 1,
+                "Sixel frame prints the title more than once"
+            );
+        }
+        let screen = screen_text(&output);
+        for label in ["tone", "x Stop", "←/→ Seek", "Speed: 1.00x", "q Quit"] {
+            assert!(screen.contains(label), "Missing {label}");
+        }
+        assert!(has_wave(&screen));
+        master.write_all(b" ").unwrap();
+        read_until(&mut master, &mut output, |bytes| {
+            screen_text(bytes).contains("Paused")
+        });
+        assert_eq!(
+            output[last_frame(&output)..]
+                .windows(4)
+                .any(|chunk| chunk == b"\x1b[2J"),
+            update == "full",
+            "Unexpected screen clear in {update} mode"
+        );
+
+        master.write_all(b"b").unwrap();
+        read_until(&mut master, &mut output, |bytes| {
+            screen_text(bytes).contains("Wave visualization enabled")
+        });
+        assert!(
+            !output[last_frame(&output)..]
+                .windows(sixel.len())
+                .any(|chunk| chunk == sixel)
+        );
+        master.write_all(b"b").unwrap();
+        read_until(&mut master, &mut output, |bytes| {
+            screen_text(bytes).contains("Dance visualization enabled")
+                && bytes[last_frame(bytes)..]
+                    .windows(sixel.len())
+                    .any(|chunk| chunk == sixel)
+        });
+        master.write_all(b"s").unwrap();
+        read_until(&mut master, &mut output, |bytes| {
+            screen_text(bytes).contains("plavno · Sources")
+        });
+        assert!(
+            !output[last_frame(&output)..]
+                .windows(sixel.len())
+                .any(|chunk| chunk == sixel)
+        );
+        master.write_all(b"\x1b").unwrap();
+        read_until(&mut master, &mut output, |bytes| {
+            screen_text(bytes).contains("tone")
+                && bytes[last_frame(bytes)..]
+                    .windows(sixel.len())
+                    .any(|chunk| chunk == sixel)
+        });
+        master.write_all(b"h").unwrap();
+        read_until(&mut master, &mut output, |bytes| {
+            screen_text(bytes).contains("History ·")
+        });
+        assert!(
+            !output[last_frame(&output)..]
+                .windows(sixel.len())
+                .any(|chunk| chunk == sixel)
+        );
+        master.write_all(b"\x1b").unwrap();
+        read_until(&mut master, &mut output, |bytes| {
+            screen_text(bytes).contains("tone")
+                && bytes[last_frame(bytes)..]
+                    .windows(sixel.len())
+                    .any(|chunk| chunk == sixel)
+        });
+
+        let size = libc::winsize {
+            ws_row: 32,
+            ws_col: 72,
+            ws_xpixel: 576,
+            ws_ypixel: 512,
+        };
+        assert_eq!(
+            unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+            0
+        );
+        read_until(&mut master, &mut output, |bytes| {
+            let frame = &bytes[last_frame(bytes)..];
+            let screen = screen_text(bytes);
+            screen
+                .lines()
+                .position(|line| line.contains('╰'))
+                .is_some_and(|line| line < 32)
+                && frame.windows(sixel.len()).any(|chunk| chunk == sixel)
+        });
+        master.write_all(b"v").unwrap();
+        read_until(&mut master, &mut output, |bytes| {
+            screen_text(bytes).contains("Dance visualization disabled")
+        });
+        assert!(
+            !output[last_frame(&output)..]
+                .windows(sixel.len())
+                .any(|chunk| chunk == sixel)
+        );
+        master.write_all(b"q").unwrap();
+        read_until(&mut master, &mut output, |bytes| {
+            bytes.windows(8).any(|chunk| chunk == b"\x1b[?1049l")
+        });
+    }
 }
 
 #[test]
