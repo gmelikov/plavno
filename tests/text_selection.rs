@@ -134,19 +134,32 @@ fn pane_height(screen: &str) -> Option<usize> {
     bottom.checked_sub(top).map(|height| height + 1)
 }
 
-fn click_label(master: &mut File, output: &mut Vec<u8>, label: &str) {
-    let locate = |bytes: &[u8]| {
-        let screen = screen_text(bytes);
-        screen.lines().enumerate().find_map(|(row, line)| {
+fn label_position(bytes: &[u8], label: &str) -> Option<(usize, usize)> {
+    let screen = screen_text(bytes);
+    screen
+        .lines()
+        .enumerate()
+        .filter_map(|(row, line)| {
             let index = line.find(label)?;
             Some((
                 row,
                 unicode_width::UnicodeWidthStr::width(&line[..index]) + 1,
             ))
         })
-    };
-    read_until(master, output, |bytes| locate(bytes).is_some());
-    let (row, column) = locate(output).unwrap();
+        .last()
+}
+
+#[test]
+fn mouse_target_prefers_the_control_below_a_notification_with_the_same_label() {
+    let output = b"\x1b[16;1HDisliked: tone.flac - u Undo\x1b[22;1H q Quit   u Undo ";
+    assert_eq!(label_position(output, "u Undo"), Some((21, 11)));
+}
+
+fn click_label(master: &mut File, output: &mut Vec<u8>, label: &str) {
+    read_until(master, output, |bytes| {
+        label_position(bytes, label).is_some()
+    });
+    let (row, column) = label_position(output, label).unwrap();
     master
         .write_all(format!("\x1b[<0;{column};{}M\x1b[<0;{column};{}m", row + 1, row + 1).as_bytes())
         .unwrap();
