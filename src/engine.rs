@@ -486,7 +486,7 @@ impl Engine {
 
     pub fn set_wave_style(&mut self, style: WaveStyle) {
         if !self.can_tune_wave() {
-            self.message = "Select Yandex Music or VK Music to tune its wave".into();
+            self.message = "This source does not support Flow settings".into();
             return;
         }
         self.wave_styles.insert(self.source.into(), style);
@@ -1212,7 +1212,17 @@ impl Engine {
                                 }
                                 continue;
                             }
+                            let source = if track.source.is_empty() {
+                                self.source
+                            } else {
+                                &track.source
+                            };
+                            let repeats = self
+                                .services
+                                .iter()
+                                .any(|service| service.key == source && service.allow_repeats);
                             if (self.mode == PlaybackMode::MyVibe
+                                && !repeats
                                 && self.seen.contains(&track.cache_key()))
                                 || !batch_ids.insert(track.cache_key())
                             {
@@ -1548,6 +1558,64 @@ mod tests {
         let mut track = track(id);
         track.batch.clear();
         track
+    }
+
+    #[test]
+    fn local_shuffle_repeats_through_the_engine_and_keeps_cached_audio() {
+        if std::env::var_os("PLAVNO_LOCAL_TEST_CHILD").is_none() {
+            let config =
+                std::env::temp_dir().join(format!("plavno-local-alsa-{}.conf", std::process::id()));
+            std::fs::write(&config, "pcm.!default { type null }\n").unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "engine::tests::local_shuffle_repeats_through_the_engine_and_keeps_cached_audio", "--nocapture"])
+                .env("PLAVNO_LOCAL_TEST_CHILD", "1")
+                .env("ALSA_CONFIG_PATH", &config)
+                .output().unwrap();
+            std::fs::remove_file(config).unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("plavno-local-engine-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tone.flac"),
+            root.join("single.flac"),
+        )
+        .unwrap();
+        let backend = crate::backend::LocalDirectory::new(root.clone()).unwrap();
+        let services = backend.services();
+        let backend =
+            crate::backend::Multi::new(vec![Box::new(backend)], services, Some("local")).unwrap();
+        let (mut engine, _, events) = Engine::new(Box::new(backend)).unwrap();
+        engine.paused = true;
+        engine.start();
+        pump(&mut engine, &events, |engine| {
+            engine.current.is_some() && !engine.queue.upcoming.is_empty()
+        });
+        assert!(!engine.can_tune_wave());
+        let id = engine.track().unwrap().id.clone();
+        let cached = engine.current.as_ref().unwrap().buffer.clone();
+        for _ in 0..5 {
+            engine.control(Command::Next);
+            pump(&mut engine, &events, |engine| {
+                engine.current.is_some() && !engine.queue.upcoming.is_empty()
+            });
+            assert_eq!(engine.track().unwrap().id, id);
+            assert!(Arc::ptr_eq(
+                &cached,
+                &engine.current.as_ref().unwrap().buffer
+            ));
+            assert!(!engine.exhausted);
+        }
+        let done = engine.shutdown();
+        done.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(engine);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn vk_supports_my_music_shuffle() {

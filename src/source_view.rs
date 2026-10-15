@@ -208,6 +208,7 @@ mod tests {
                     favorites: false,
                     favorites_shuffle: false,
                     wave_styles: false,
+                    allow_repeats: false,
                 })
                 .to_vec(),
             "first",

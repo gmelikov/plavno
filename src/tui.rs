@@ -367,8 +367,7 @@ pub fn run(
                                         ));
                                     } else {
                                         engine.message =
-                                            "Select Yandex Music or VK Music to tune its wave"
-                                                .into();
+                                            "This source does not support Flow settings".into();
                                     }
                                 }
                                 KeyCode::Char('h' | '/') => {

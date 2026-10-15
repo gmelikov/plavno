@@ -130,8 +130,17 @@ impl FlowView {
             rows[1],
             &mut self.state,
         );
-        frame.render_widget(Paragraph::new("Click a preset to apply it. Applying starts a new wave; settings are saved per service.")
-            .wrap(Wrap { trim: true }).style(Style::default().fg(Color::Gray)), rows[2]);
+        let help = if self.source == "mixed" {
+            "Applying restarts the mix. Sources without Flow support keep playing without mood filters. The mix preset is saved separately."
+        } else {
+            "Click a preset to apply it. Applying starts a new wave; settings are saved per source."
+        };
+        frame.render_widget(
+            Paragraph::new(help)
+                .wrap(Wrap { trim: true })
+                .style(Style::default().fg(Color::Gray)),
+            rows[2],
+        );
     }
 }
 

@@ -9,7 +9,7 @@ mod yandex;
 mod yandex_cache;
 
 pub use bridge::Bridge;
-pub use local::Local;
+pub use local::{Local, LocalDirectory};
 pub use multi::Multi;
 pub use rate_limit::RateLimited;
 pub use soundcloud::SoundCloud;
@@ -56,6 +56,7 @@ pub struct Service {
     pub favorites: bool,
     pub favorites_shuffle: bool,
     pub wave_styles: bool,
+    pub allow_repeats: bool,
 }
 
 #[derive(Clone)]
@@ -157,6 +158,7 @@ pub trait Backend: Send {
             favorites: self.supports_favorites(),
             favorites_shuffle: self.supports_favorites_shuffle(),
             wave_styles: self.supports_wave_styles(),
+            allow_repeats: self.allows_repeats(),
         }]
     }
     fn start_source(&mut self, source: &str, mode: PlaybackMode) -> Result<Vec<Track>> {
@@ -168,6 +170,9 @@ pub trait Backend: Send {
     }
     fn name(&self) -> &'static str;
     fn supports_wave_styles(&self) -> bool {
+        false
+    }
+    fn allows_repeats(&self) -> bool {
         false
     }
     fn set_wave_style(&mut self, style: WaveStyle) -> Result<()> {
@@ -183,7 +188,9 @@ pub trait Backend: Send {
         mode: PlaybackMode,
         style: WaveStyle,
     ) -> Result<Vec<Track>> {
-        self.set_wave_style(style)?;
+        if self.supports_wave_styles() {
+            self.set_wave_style(style)?;
+        }
         self.start_source(source, mode)
     }
     fn start(&mut self) -> Result<Vec<Track>>;

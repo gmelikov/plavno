@@ -64,6 +64,7 @@ For development, use `cargo run` or `cargo check` and keep the build cache.
 | SoundCloud | `soundcloud` | — | Track stations | Browser sign-in or a public seed track |
 | Spotify | `spotify` | — | Track radio | Optional Rust helper; Premium and OAuth |
 | YouTube Music | `ytmusic` | — | Home mixes and track radio | Optional Rust helper; cookies or a public seed |
+| Local music | `local` | — | Recursive directory shuffle | A local music directory |
 
 ### Yandex Music
 
@@ -106,6 +107,10 @@ plavno --source yandex --favorites      # Shuffle Yandex favorites
 plavno --source vk                      # VK recommendations
 plavno --source vk --favorites          # Shuffle VK My Music
 plavno --source mixed                   # Mix waves from connected services
+plavno local ~/Music                    # Save the local music directory
+plavno --source local                   # Shuffle the saved directory, including subdirectories
+plavno --directory /path/to/music       # Use a different directory for this run
+plavno --source mixed --directory ~/Music # Include local music in the mix
 plavno --file /path/to/track.flac        # Play a local file
 plavno --no-wave                        # Start without visualization
 ```
@@ -166,6 +171,18 @@ to close.
 Flow changes recommendations. Work requests calm ambient without vocals on Yandex
 and calm instrumental tracks on VK. `w` returns from library shuffle to a new wave;
 VK filters recent tracks to avoid repeating the initial queue.
+Flow also works in Wave Shuffle: it changes supported sources, while other sources,
+including local music, keep playing their full libraries without mood filtering.
+
+Local music discovers MP3, FLAC, M4A/MP4, and Ogg Vorbis files recursively in the
+background, visiting subdirectories in random order. Playback can start before
+discovery finishes; the first tracks depend on which files have been discovered.
+Tracks shuffle without repeats within a pass, then start a new pass without an
+immediate boundary repeat when more than one playable track is available. Symlinks
+are skipped. Files that cannot be opened or recognized are skipped when preparing
+the queue. Titles use filenames; duration comes from the audio header.
+Press `w` to rescan and start a new shuffle. The file list stays in RAM; only the
+configured directory is saved in `~/.config/plavno/local.json`.
 
 ## Playback and data
 

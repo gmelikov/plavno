@@ -27,6 +27,10 @@ type Registry = (
 );
 
 pub fn backends() -> Result<Registry> {
+    backends_with_directory(None)
+}
+
+pub fn backends_with_directory(directory: Option<PathBuf>) -> Result<Registry> {
     use crate::backend::{Backend, Bridge, Service, SoundCloud, Vk};
     let mut backends: Vec<Box<dyn Backend>> = Vec::new();
     let mut services = Vec::new();
@@ -41,6 +45,7 @@ pub fn backends() -> Result<Registry> {
                 favorites: true,
                 favorites_shuffle: true,
                 wave_styles: true,
+                allow_repeats: false,
             });
         }
         Err(_) => services.push(Service {
@@ -51,6 +56,7 @@ pub fn backends() -> Result<Registry> {
             favorites: true,
             favorites_shuffle: true,
             wave_styles: true,
+            allow_repeats: false,
         }),
     }
     for (key, name) in JSON_PROVIDERS {
@@ -64,6 +70,7 @@ pub fn backends() -> Result<Registry> {
             favorites: key == "vk",
             favorites_shuffle: key == "vk",
             wave_styles: key == "vk",
+            allow_repeats: false,
             status: if ready {
                 if matches!(key, "spotify" | "ytmusic") {
                     "Configured · native adapter required".into()
@@ -82,7 +89,64 @@ pub fn backends() -> Result<Registry> {
             });
         }
     }
+    let local = match directory {
+        Some(path) => Ok(Some(validate_local_directory(&path)?)),
+        None => local_directory(),
+    };
+    let (available, status) = match local {
+        Ok(Some(path)) if path.is_dir() => {
+            let status = format!("{} · recursive shuffle", path.display());
+            backends.push(Box::new(crate::backend::LocalDirectory::new(path)?));
+            (true, status)
+        }
+        Ok(Some(path)) => (false, format!("Directory unavailable: {}", path.display())),
+        Ok(None) => (false, "Configure with: plavno local DIRECTORY".into()),
+        Err(error) => (false, format!("Local settings unavailable: {error:#}")),
+    };
+    services.push(Service {
+        key: "local",
+        name: "Local music",
+        status,
+        available,
+        favorites: false,
+        favorites_shuffle: false,
+        wave_styles: false,
+        allow_repeats: true,
+    });
     Ok((backends, services))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LocalSettings {
+    directory: PathBuf,
+}
+
+fn local_directory() -> Result<Option<PathBuf>> {
+    let path = token_path()?.with_file_name("local.json");
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    let settings: LocalSettings = serde_json::from_str(&crate::backend::web::private(&path)?)
+        .context("Invalid local directory settings")?;
+    Ok(Some(settings.directory))
+}
+
+fn validate_local_directory(path: &std::path::Path) -> Result<PathBuf> {
+    let path = path.canonicalize().context("Local directory not found")?;
+    ensure!(path.is_dir(), "Local music path must be a directory");
+    Ok(path)
+}
+
+pub fn save_local_directory(path: &std::path::Path) -> Result<PathBuf> {
+    let directory = validate_local_directory(path)?;
+    let settings = LocalSettings {
+        directory: directory.clone(),
+    };
+    save_private(
+        &token_path()?.with_file_name("local.json"),
+        &serde_json::to_vec_pretty(&settings)?,
+    )?;
+    Ok(directory)
 }
 
 pub fn yandex_with_token(token: String) -> crate::backend::Yandex {

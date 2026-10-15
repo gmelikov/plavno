@@ -33,7 +33,8 @@ impl Multi {
             available: connected > 1,
             favorites: false,
             favorites_shuffle: false,
-            wave_styles: false,
+            wave_styles: backends.iter().any(|b| b.supports_wave_styles()),
+            allow_repeats: false,
             status: if connected > 1 {
                 "Random source for each track".into()
             } else {
@@ -92,13 +93,15 @@ impl Multi {
     fn mixed(&mut self, history: &[String]) -> Result<Vec<Track>> {
         let mut tracks = Vec::new();
         let mut seen: HashSet<String> = history.iter().cloned().collect();
+        let mut batch_ids = HashSet::new();
+        let mut exhausted = HashSet::new();
         let mut last_error = None;
         while tracks.len() < 6 {
             let available: Vec<_> = self
                 .slots
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| !s.failed)
+                .filter(|(i, s)| !s.failed && !exhausted.contains(i))
                 .map(|(i, _)| i)
                 .collect();
             if available.is_empty() {
@@ -107,6 +110,7 @@ impl Multi {
             let index = available[random_index(available.len(), &mut self.random)?];
             let slot = &mut self.slots[index];
             let key = slot.backend.key();
+            let repeats = slot.backend.allows_repeats();
             if slot.queue.is_empty() {
                 let prefix = format!("{key}:");
                 let history: Vec<_> = seen
@@ -122,9 +126,16 @@ impl Multi {
                 match result {
                     Ok(mut batch) => {
                         Self::tag(key, &mut batch);
-                        batch.retain(|t| !seen.contains(&t.cache_key()));
+                        batch.retain(|t| {
+                            !batch_ids.contains(&t.cache_key())
+                                && (repeats || !seen.contains(&t.cache_key()))
+                        });
                         if batch.is_empty() {
-                            slot.failed = true;
+                            if repeats {
+                                exhausted.insert(index);
+                            } else {
+                                slot.failed = true;
+                            }
                             continue;
                         }
                         slot.queue.extend(batch);
@@ -137,9 +148,14 @@ impl Multi {
                 }
             }
             if let Some(track) = slot.queue.pop_front()
-                && seen.insert(track.cache_key())
+                && (repeats || !seen.contains(&track.cache_key()))
+                && batch_ids.insert(track.cache_key())
             {
+                seen.insert(track.cache_key());
                 tracks.push(track);
+            }
+            if repeats && slot.queue.is_empty() {
+                exhausted.insert(index);
             }
         }
         if tracks.is_empty()
@@ -151,7 +167,7 @@ impl Multi {
     }
 }
 
-fn random_index(upper: usize, random: &mut impl Read) -> Result<usize> {
+pub(super) fn random_index(upper: usize, random: &mut impl Read) -> Result<usize> {
     let bound = upper as u64;
     let limit = u64::MAX - u64::MAX % bound;
     loop {
@@ -199,12 +215,16 @@ impl Backend for Multi {
         style: WaveStyle,
     ) -> Result<Vec<Track>> {
         if source == "mixed" {
-            ensure!(
-                style == WaveStyle::Balanced,
-                "Select a service to tune its wave"
-            );
+            for slot in &mut self.slots {
+                if slot.backend.supports_wave_styles() {
+                    slot.backend.set_wave_style(style)?;
+                }
+            }
         } else {
-            self.slot(source)?.backend.set_wave_style(style)?;
+            let backend = &mut self.slot(source)?.backend;
+            if backend.supports_wave_styles() {
+                backend.set_wave_style(style)?;
+            }
         }
         self.start_source(source, mode)
     }
@@ -275,6 +295,7 @@ impl Backend for Multi {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    use std::{fs, path::PathBuf};
     type Calls = Arc<Mutex<Vec<String>>>;
     struct Fake {
         key: &'static str,
@@ -287,6 +308,9 @@ mod tests {
         }
         fn name(&self) -> &'static str {
             self.key
+        }
+        fn supports_wave_styles(&self) -> bool {
+            self.key == "yandex"
         }
         fn set_wave_style(&mut self, style: WaveStyle) -> Result<()> {
             ensure!(
@@ -441,15 +465,66 @@ mod tests {
             *calls.lock().unwrap(),
             vec!["yandex:style:Work", "yandex:start"]
         );
+        calls.lock().unwrap().clear();
+        let tracks = multi
+            .start_with_style("spotify", PlaybackMode::MyVibe, WaveStyle::Work)
+            .unwrap();
+        assert_eq!(tracks[0].source, "spotify");
+        assert_eq!(*calls.lock().unwrap(), vec!["spotify:start"]);
+
+        calls.lock().unwrap().clear();
+        let tracks = multi
+            .start_with_style("mixed", PlaybackMode::MyVibe, WaveStyle::Calm)
+            .unwrap();
+        assert_eq!(tracks.len(), 2);
+        let log = calls.lock().unwrap();
+        assert_eq!(
+            log.iter()
+                .filter(|call| call.contains(":style:"))
+                .collect::<Vec<_>>(),
+            vec!["yandex:style:Calm"]
+        );
+        assert!(log.contains(&"yandex:start".into()));
+        assert!(log.contains(&"spotify:start".into()));
         assert!(
             multi
-                .start_with_style("spotify", PlaybackMode::MyVibe, WaveStyle::Work)
-                .is_err()
+                .services()
+                .iter()
+                .any(|s| s.key == "mixed" && s.wave_styles)
         );
-        assert!(
-            multi
-                .start_with_style("mixed", PlaybackMode::MyVibe, WaveStyle::Calm)
-                .is_err()
-        );
+    }
+
+    #[test]
+    fn mixed_keeps_a_small_local_library_playing_across_passes() {
+        let root = std::env::temp_dir().join(format!("plavno-mixed-local-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tone.flac"),
+            root.join("track.flac"),
+        )
+        .unwrap();
+        let calls = Arc::default();
+        let backends: Vec<Box<dyn Backend>> = vec![
+            Box::new(super::super::LocalDirectory::new(root.clone()).unwrap()),
+            Box::new(Fake {
+                key: "yandex",
+                calls,
+                fail: true,
+            }),
+        ];
+        let services = backends.iter().flat_map(|b| b.services()).collect();
+        let mut multi = Multi::new(backends, services, Some("mixed")).unwrap();
+        let first = multi
+            .start_with_style("mixed", PlaybackMode::MyVibe, WaveStyle::Work)
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].source, "local");
+        for _ in 0..3 {
+            let next = multi.more(&[first[0].cache_key()]).unwrap();
+            assert_eq!(next.len(), 1);
+            assert_eq!(next[0].cache_key(), first[0].cache_key());
+        }
+        drop(multi);
+        fs::remove_dir_all(root).unwrap();
     }
 }
