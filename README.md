@@ -4,7 +4,7 @@
 
 A lightweight TUI player for Linux with music streams from popular services, library shuffle, and mouse controls.
 
-<img src="intro.png" alt="plavno terminal player with album artwork and an audio-reactive wave" width="791">
+<img src="intro.png" alt="plavno terminal player with album artwork and an audio-reactive wave" width="885">
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
