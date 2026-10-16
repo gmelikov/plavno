@@ -22,11 +22,21 @@ type Registry = (
 );
 
 pub fn backends() -> Result<Registry> {
-    backends_with_directory(None)
+    backends_with_overrides(None, None)
 }
 
-pub fn backends_with_directory(directory: Option<PathBuf>) -> Result<Registry> {
+pub fn backends_with_overrides(
+    directory: Option<PathBuf>,
+    seed: Option<(&str, &str)>,
+) -> Result<Registry> {
     use crate::backend::{Backend, Bridge, Service, SoundCloud, Vk};
+    if let Some((source, seed)) = seed {
+        ensure!(
+            matches!(source, "ytmusic" | "soundcloud" | "spotify"),
+            "--seed requires --source ytmusic, soundcloud or spotify"
+        );
+        ensure!(!seed.trim().is_empty(), "--seed requires a track ID or URL");
+    }
     let mut backends: Vec<Box<dyn Backend>> = Vec::new();
     let mut services = Vec::new();
     match load() {
@@ -56,7 +66,11 @@ pub fn backends_with_directory(directory: Option<PathBuf>) -> Result<Registry> {
     }
     for (key, name) in JSON_PROVIDERS {
         let path = profile_path(key)?;
-        let ready = plavno_platform::private_file(&path).unwrap_or(false);
+        let seed = seed
+            .filter(|(source, _)| *source == key)
+            .map(|(_, seed)| seed);
+        let ready = plavno_platform::private_file(&path).unwrap_or(false)
+            || (seed.is_some() && matches!(key, "ytmusic" | "soundcloud"));
         services.push(Service {
             key,
             name,
@@ -65,7 +79,9 @@ pub fn backends_with_directory(directory: Option<PathBuf>) -> Result<Registry> {
             favorites_shuffle: key == "vk",
             wave_styles: key == "vk",
             allow_repeats: false,
-            status: if ready {
+            status: if seed.is_some() && ready {
+                "Session radio override".into()
+            } else if ready {
                 if matches!(key, "spotify" | "ytmusic") {
                     "Configured · native adapter required".into()
                 } else {
@@ -77,9 +93,9 @@ pub fn backends_with_directory(directory: Option<PathBuf>) -> Result<Registry> {
         });
         if ready {
             backends.push(match key {
-                "soundcloud" => Box::new(SoundCloud::new(path)),
+                "soundcloud" => Box::new(SoundCloud::new(path).with_seed(seed)),
                 "vk" => Box::new(Vk::new(path)),
-                _ => Box::new(Bridge::new(key, name, path)),
+                _ => Box::new(Bridge::new(key, name, path).with_seed(seed)),
             });
         }
     }

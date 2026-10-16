@@ -23,6 +23,7 @@ pub struct Bridge {
     key: &'static str,
     name: &'static str,
     profile: PathBuf,
+    seed: Option<String>,
     worker: Option<Worker>,
 }
 
@@ -32,8 +33,14 @@ impl Bridge {
             key,
             name,
             profile,
+            seed: None,
             worker: None,
         }
+    }
+
+    pub fn with_seed(mut self, seed: Option<&str>) -> Self {
+        self.seed = seed.map(str::to_owned);
+        self
     }
 
     fn command(&self) -> (PathBuf, Vec<String>) {
@@ -75,7 +82,7 @@ impl Bridge {
                 child,
             });
         }
-        let request = json!({"source":self.key,"profile":self.profile,"method":method,"track":track,"history":history});
+        let request = json!({"source":self.key,"profile":self.profile,"seed":self.seed,"method":method,"track":track,"history":history});
         let result = (|| {
             let worker = self.worker.as_mut().unwrap();
             serde_json::to_writer(&mut worker.stdin, &request)?;

@@ -49,6 +49,76 @@ fn version_is_available_without_an_account_or_terminal() {
 }
 
 #[test]
+fn radio_override_enables_public_sources_without_creating_or_changing_profiles() {
+    let config = ConfigDir::new();
+    for source in ["ytmusic", "soundcloud"] {
+        let run = || {
+            let output = config
+                .command()
+                .args(["--source", source, "--seed", "session-track"])
+                .output()
+                .unwrap();
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.contains("interactive terminal"), "{error}");
+        };
+        run();
+        let directory = config.0.join("plavno");
+        assert!(!directory.exists());
+        plavno_platform::private_directory(&directory).unwrap();
+        let profile = directory.join(format!("{source}.json"));
+        let saved = br#"{"seed":"saved-track","token":"fixture-token"}"#;
+        use std::io::Write;
+        plavno_platform::private_options()
+            .write(true)
+            .create_new(true)
+            .open(&profile)
+            .unwrap()
+            .write_all(saved)
+            .unwrap();
+        run();
+        assert_eq!(fs::read(&profile).unwrap(), saved);
+        fs::remove_dir_all(directory).unwrap();
+    }
+    let output = config
+        .command()
+        .args(["--source", "spotify", "--seed", "spotify:track:ID"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not connected"));
+}
+
+#[test]
+fn radio_override_rejects_missing_values_ambiguous_sources_and_conflicting_modes() {
+    let config = ConfigDir::new();
+    for args in [
+        vec!["--seed"],
+        vec!["--source", "ytmusic", "--seed", ""],
+        vec!["--source", "ytmusic", "--seed", "--no-wave"],
+        vec!["--seed", "track"],
+        vec!["--source", "mixed", "--seed", "track"],
+        vec!["--source", "yandex", "--seed", "track"],
+        vec!["--source", "local", "--seed", "track"],
+        vec!["--source", "vk", "--seed", "track"],
+        vec!["--source", "ytmusic", "--seed", "track", "--favorites"],
+        vec![
+            "--source",
+            "ytmusic",
+            "--seed",
+            "track",
+            "--file",
+            "track.mp3",
+        ],
+    ] {
+        let output = config.command().args(&args).output().unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("--seed"), "{args:?}: {error}");
+        assert!(!error.contains("interactive terminal"), "{args:?}: {error}");
+    }
+    assert!(!config.0.join("plavno").exists());
+}
+
+#[test]
 fn sources_lists_yandex_with_and_without_a_connected_account() {
     let config = ConfigDir::new();
     for connected in [false, true] {

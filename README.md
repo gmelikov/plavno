@@ -109,18 +109,30 @@ with `plavno login vk --manual`.
 
 Run `plavno login soundcloud`, sign in through Chrome/Chromium, and choose a
 seed track when prompted. Start with `plavno --source soundcloud`.
+Use `plavno --source soundcloud --seed TRACK_URL` for a one-time public station
+or to override the saved seed for this run.
 [Manual setup](docs/services.md#manual-soundcloud-session) also supports public track stations.
 
 ### Spotify
 
-Run `plavno login spotify` and paste a JSON profile with a seed track URI, OAuth token
-with `streaming` scope, and client ID. Premium is required. Start with `plavno --source spotify`.
+Run `plavno login spotify` and paste a JSON profile with an OAuth token with
+`streaming` scope and client ID. Premium is required. Start with
+`plavno --source spotify --seed spotify:track:TRACK_ID`.
+A saved profile seed is also supported; `--seed` overrides it for this run.
 
 ### YouTube Music
 
-Run `plavno login ytmusic` and paste `{"cookies":"/absolute/path/youtube-cookies.txt"}`
-using a Netscape cookie export, or `{"seed":"VIDEO_ID_OR_URL"}` for public radio.
-Start with `plavno --source ytmusic`.
+For public track radio, no login is needed:
+
+```sh
+plavno --source ytmusic --seed VIDEO_ID_OR_URL
+```
+
+For personal mixes, run `plavno login ytmusic` and paste
+`{"cookies":"/absolute/path/youtube-cookies.txt"}` using a Netscape cookie export,
+then start with `plavno --source ytmusic`.
+`--seed` uses any saved credentials and overrides the saved seed or mix for this
+run without changing the profile. Live streams are not supported.
 
 Homebrew and release archives include both helpers. Cargo installations need
 [separate helper builds](docs/services.md#spotify-and-youtube-music).
@@ -135,6 +147,7 @@ plavno --source yandex --favorites      # Shuffle Yandex favorites
 plavno --source vk                      # VK recommendations
 plavno --source vk --favorites          # Shuffle VK My Music
 plavno --source mixed                   # Mix waves from connected services
+plavno --source ytmusic --seed VIDEO_ID_OR_URL # One-time track radio, without login
 plavno local ~/Music                    # Save the local music directory
 plavno --source local                   # Shuffle the saved directory, including subdirectories
 plavno --directory /path/to/music       # Use a different directory for this run

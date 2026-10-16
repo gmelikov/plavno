@@ -104,8 +104,23 @@ Alternatively, put `plavno-spotify` / `plavno-youtube` on PATH. Run
 
 | Service | Profile example | Requirements |
 |---|---|---|
-| Spotify | `{"seed":"spotify:track:TRACK_ID","token":"ACCESS_TOKEN","client_id":"OAUTH_CLIENT_ID"}` | Premium; OAuth token with `streaming` scope. Reusable credentials are saved privately. |
-| YouTube Music | `{"cookies":"/absolute/path/youtube-cookies.txt"}` | Netscape cookies for home mixes. Public radio also accepts `{"seed":"VIDEO_ID_OR_URL"}`; playlists accept `{"playlist":"MIX_PLAYLIST_ID"}`. |
+| Spotify | `{"token":"ACCESS_TOKEN","client_id":"OAUTH_CLIENT_ID"}` | Premium; OAuth token with `streaming` scope. Pass `--seed spotify:track:TRACK_ID` when starting playback, or add `seed` to the profile. Reusable credentials are saved privately. |
+| YouTube Music | `{"cookies":"/absolute/path/youtube-cookies.txt"}` | Netscape cookies for home mixes. Saved seeds (`{"seed":"VIDEO_ID_OR_URL"}`) and playlists (`{"playlist":"MIX_PLAYLIST_ID"}`) are also supported. |
+
+To start public YouTube Music radio without creating a connection profile:
+
+```sh
+plavno --source ytmusic --seed VIDEO_ID_OR_URL
+```
+
+`--seed` also works with `--source soundcloud` (a track URL) and `--source spotify`
+(a `spotify:track:` URI). It takes priority over the saved seed or mix, reuses
+saved authentication, and lasts for the current process, including wave restarts
+and source switching. The connection profile is not changed. SoundCloud and
+YouTube Music can use a public seed without login; Spotify requires saved
+credentials and Premium. Select one of these sources explicitly; `--seed`
+cannot be combined with `--source mixed`, `--favorites`, or `--file`.
+Rebuild the helpers along with the player when updating a source installation.
 
 YouTube web streams may need
 [rustypipe-botguard](https://codeberg.org/ThetaDev/rustypipe-botguard) on PATH,

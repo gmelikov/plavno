@@ -29,18 +29,11 @@ fn private(path: &Path) -> Result<()> {
 }
 
 impl Spotify {
-    async fn connect(path: &str) -> Result<Self> {
+    async fn connect(path: &str, seed: Option<&str>) -> Result<Self> {
         let path = Path::new(path);
         private(path)?;
         let profile: Value = serde_json::from_slice(&fs::read(path)?)?;
-        let seed = profile["seed"]
-            .as_str()
-            .context("Spotify needs a seed track URI; run plavno login spotify")?
-            .to_owned();
-        ensure!(
-            matches!(SpotifyUri::from_uri(&seed)?, SpotifyUri::Track { .. }),
-            "Spotify seed must be a spotify:track: URI"
-        );
+        let seed = seed_uri(&profile, seed)?;
         let directory = path
             .parent()
             .context("Missing profile directory")?
@@ -180,6 +173,17 @@ impl Spotify {
     }
 }
 
+fn seed_uri(profile: &Value, seed: Option<&str>) -> Result<String> {
+    let seed = seed
+        .or_else(|| profile["seed"].as_str())
+        .context("Spotify needs --seed spotify:track:ID or a seed in the connection profile")?;
+    ensure!(
+        matches!(SpotifyUri::from_uri(seed)?, SpotifyUri::Track { .. }),
+        "Spotify seed must be a spotify:track: URI"
+    );
+    Ok(seed.to_owned())
+}
+
 fn collect_tracks(value: &Value, ids: &mut Vec<String>) {
     match value {
         Value::String(uri) if uri.starts_with("spotify:track:") => ids.push(uri.clone()),
@@ -212,6 +216,7 @@ async fn handle(adapter: &mut Option<Spotify>, request: &Value) -> Result<Value>
                 request["profile"]
                     .as_str()
                     .context("Missing profile path")?,
+                request["seed"].as_str(),
             )
             .await?,
         );
@@ -280,6 +285,22 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn session_seed_overrides_the_profile_and_auth_profiles_do_not_need_a_seed() {
+        let saved = "spotify:track:0000000000000000000001";
+        let replacement = "spotify:track:0000000000000000000002";
+        let profile = json!({"seed":saved,"token":"fixture-token"});
+        assert_eq!(seed_uri(&profile, None).unwrap(), saved);
+        assert_eq!(seed_uri(&profile, Some(replacement)).unwrap(), replacement);
+        assert_eq!(profile["seed"], saved);
+        assert_eq!(
+            seed_uri(&json!({"token":"fixture-token"}), Some(replacement)).unwrap(),
+            replacement
+        );
+        assert!(seed_uri(&json!({}), None).is_err());
+        assert!(seed_uri(&profile, Some("spotify:album:0000000000000000000001")).is_err());
+    }
+
     #[test]
     fn radio_track_ids_are_extracted_from_both_wire_formats() {
         let mut ids = vec![];

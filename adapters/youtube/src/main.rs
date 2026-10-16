@@ -35,6 +35,21 @@ fn seed_id(seed: &str) -> Result<String> {
     Ok(seed.to_owned())
 }
 
+fn connection_profile(path: &Path, seed: Option<&str>) -> Result<Value> {
+    let mut config = match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound && seed.is_some() => json!({}),
+        _ => serde_json::from_str(&private(path)?).context("Invalid connection profile")?,
+    };
+    ensure!(
+        config.is_object(),
+        "Connection profile must be a JSON object"
+    );
+    if let Some(seed) = seed {
+        config["seed"] = json!(seed);
+    }
+    Ok(config)
+}
+
 fn find_mix(value: &Value) -> Option<String> {
     match value {
         Value::Object(obj) => obj
@@ -74,9 +89,8 @@ struct Service {
 }
 
 impl Service {
-    async fn new(path: &Path) -> Result<Self> {
-        let config: Value =
-            serde_json::from_str(&private(path)?).context("Invalid connection profile")?;
+    async fn new(path: &Path, seed: Option<&str>) -> Result<Self> {
+        let config = connection_profile(path, seed)?;
         let storage = path
             .parent()
             .context("Missing profile directory")?
@@ -258,7 +272,7 @@ fn main() -> Result<()> {
             );
             if service.is_none() || method == "start" {
                 let path = PathBuf::from(request["profile"].as_str().context("Missing profile")?);
-                service = Some(runtime.block_on(Service::new(&path))?);
+                service = Some(runtime.block_on(Service::new(&path, request["seed"].as_str()))?);
             }
             let service = service.as_mut().unwrap();
             let value = if method == "resolve" {
@@ -295,6 +309,47 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_seed_works_without_a_profile_and_preserves_saved_auth_and_defaults() {
+        let directory = std::env::temp_dir().join(format!(
+            "plavno-youtube-seed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        plavno_platform::private_directory(&directory).unwrap();
+        let path = directory.join("ytmusic.json");
+        assert_eq!(
+            connection_profile(&path, Some("override")).unwrap(),
+            json!({"seed":"override"})
+        );
+        assert!(!path.exists());
+        assert!(connection_profile(&path, None).is_err());
+        let saved =
+            br#"{"seed":"saved","playlist":"RDmix","cookies":"cookies.txt","botguard":"botguard"}"#;
+        use std::io::Write;
+        plavno_platform::private_options()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .write_all(saved)
+            .unwrap();
+        let mut expected: Value = serde_json::from_slice(saved).unwrap();
+        assert_eq!(connection_profile(&path, None).unwrap(), expected);
+        expected["seed"] = json!("override");
+        assert_eq!(
+            connection_profile(&path, Some("override")).unwrap(),
+            expected
+        );
+        assert_eq!(fs::read(&path).unwrap(), saved);
+        fs::write(&path, b"null").unwrap();
+        assert!(connection_profile(&path, Some("override")).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn rpc_response_matches_the_core_protocol_and_keeps_errors_private() {

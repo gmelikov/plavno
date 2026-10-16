@@ -13,6 +13,7 @@ pub struct SoundCloud {
     token: Option<String>,
     cookies: web::Cookies,
     seed: String,
+    seed_override: Option<String>,
     user_agent: String,
 }
 
@@ -28,13 +29,27 @@ impl SoundCloud {
             token: None,
             cookies: web::Cookies::default(),
             seed: String::new(),
+            seed_override: None,
             user_agent: web::USER_AGENT.into(),
         }
     }
 
+    pub fn with_seed(mut self, seed: Option<&str>) -> Self {
+        self.seed_override = seed.map(str::to_owned);
+        self
+    }
+
     fn init(&mut self) -> Result<()> {
         if self.config.is_none() {
-            let config = web::profile(&self.profile)?;
+            let config = match std::fs::symlink_metadata(&self.profile) {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && self.seed_override.is_some() =>
+                {
+                    serde_json::json!({})
+                }
+                _ => web::profile(&self.profile)?,
+            };
             self.user_agent = web::user_agent(&config)?;
             self.client = config["client_id"].as_str().unwrap_or_default().into();
             self.token = config["token"].as_str().map(str::to_owned);
@@ -243,8 +258,10 @@ impl Backend for SoundCloud {
     }
     fn start(&mut self) -> Result<Vec<Track>> {
         self.init()?;
-        self.seed = self.config.as_ref().unwrap()["seed"]
-            .as_str()
+        self.seed = self
+            .seed_override
+            .as_deref()
+            .or_else(|| self.config.as_ref().unwrap()["seed"].as_str())
             .unwrap_or_default()
             .into();
         self.wave(&[])
@@ -365,6 +382,51 @@ impl Backend for SoundCloud {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn session_seed_overrides_the_saved_station_and_survives_restart_without_writes() {
+        let directory = std::env::temp_dir().join(format!(
+            "plavno-soundcloud-seed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let profile = directory.join("soundcloud.json");
+        let saved = br#"{"seed":"https://soundcloud.com/artist/saved","token":"fixture-token","client_id":"fixture-client"}"#;
+        crate::config::save_private(&profile, saved).unwrap();
+        let item = serde_json::json!({"id":12,"title":"Track","permalink_url":"https://soundcloud.com/artist/next"});
+        let (base, server) = web::fixture_server(|_| {
+            (0..3)
+                .flat_map(|_| {
+                    [
+                        json!({"id":"soundcloud:track-stations:12"}).to_string(),
+                        json!({"collection":[{"track":item}]}).to_string(),
+                    ]
+                })
+                .collect()
+        });
+        let mut backend = SoundCloud::new(profile.clone())
+            .with_seed(Some("https://soundcloud.com/artist/override"));
+        backend.api = base;
+        assert_eq!(backend.start().unwrap()[0].id, "12");
+        assert_eq!(backend.more(&[]).unwrap()[0].id, "12");
+        assert_eq!(backend.start().unwrap()[0].id, "12");
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 6);
+        for (index, seed) in [(0, "override"), (2, "next"), (4, "override")] {
+            assert!(requests[index].contains(&format!("%2Fartist%2F{seed}")));
+        }
+        assert!(requests.iter().all(|request| {
+            request.contains("client_id=fixture-client")
+                && request
+                    .to_lowercase()
+                    .contains("authorization: oauth fixture-token")
+        }));
+        assert_eq!(std::fs::read(profile).unwrap(), saved);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn native_station_and_resolution_choose_the_highest_full_stream() {
