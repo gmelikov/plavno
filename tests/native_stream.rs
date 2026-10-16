@@ -175,9 +175,9 @@ impl Drop for Scratch {
     }
 }
 
-fn check(hls: bool, encrypted: bool) {
+fn check(hls: bool, encrypted: bool, opus: bool) {
     let scratch = Scratch(std::env::temp_dir().join(format!(
-        "plavno-native-stream-{}-{hls}-{encrypted}",
+        "plavno-native-stream-{}-{hls}-{encrypted}-{opus}",
         std::process::id()
     )));
     fs::create_dir_all(&scratch.0).unwrap();
@@ -232,6 +232,19 @@ fn check(hls: bool, encrypted: bool) {
                 fs::read(file.path()).unwrap(),
             );
         }
+    } else if opus {
+        let output = scratch.0.join("audio.webm");
+        assert!(
+            Command::new(std::env::var_os("PLAVNO_FFMPEG").unwrap_or_else(|| "ffmpeg".into()))
+                .args(["-hide_banner", "-loglevel", "error", "-i"])
+                .arg(&fixture)
+                .args(["-t", "12", "-c:a", "libopus", "-b:a", "192k", "-vbr", "off"])
+                .arg(&output)
+                .status()
+                .unwrap()
+                .success()
+        );
+        files.insert("audio.webm".into(), fs::read(output).unwrap());
     } else {
         files.insert("audio.flac".into(), fs::read(&fixture).unwrap());
     }
@@ -247,7 +260,7 @@ fn check(hls: bool, encrypted: bool) {
         )
         .unwrap(),
     );
-    let request = serde_json::json!({"url":format!("{}/{}",server.url,if hls {"list.m3u8"} else {"audio.flac"})});
+    let request = serde_json::json!({"url":format!("{}/{}",server.url,if hls {"list.m3u8"} else if opus {"audio.webm"} else {"audio.flac"})});
     writeln!(process.0.stdin.take().unwrap(), "{request}").unwrap();
     let mut stdout = process.0.stdout.take().unwrap();
     let (ready, started) = mpsc::channel();
@@ -293,7 +306,7 @@ fn check(hls: bool, encrypted: bool) {
     let rate = decoder.sample_rate() as usize * usize::from(decoder.channels());
     let samples = decoder.count();
     assert!(samples > 10 * rate);
-    if hls {
+    if hls || opus {
         assert!(samples < 13 * rate);
     }
     assert_eq!(
@@ -306,17 +319,48 @@ fn check(hls: bool, encrypted: bool) {
 #[test]
 #[ignore = "Requires ffmpeg on PATH or PLAVNO_FFMPEG"]
 fn native_http_audio_starts_before_full_download() {
-    check(false, false);
+    check(false, false, false);
 }
 
 #[test]
 #[ignore = "Requires ffmpeg on PATH or PLAVNO_FFMPEG"]
 fn native_hls_audio_starts_before_full_download() {
-    check(true, false);
+    check(true, false, false);
 }
 
 #[test]
 #[ignore = "Requires ffmpeg on PATH or PLAVNO_FFMPEG"]
 fn native_aes_hls_audio_starts_before_full_download() {
-    check(true, true);
+    check(true, true, false);
+}
+
+#[test]
+#[ignore = "Requires ffmpeg on PATH or PLAVNO_FFMPEG"]
+fn native_opus_webm_audio_is_converted_to_decodable_flac_before_full_download() {
+    check(false, false, true);
+}
+
+#[test]
+#[ignore = "Requires ffmpeg on PATH or PLAVNO_FFMPEG"]
+fn native_conversion_reports_http_errors_without_signed_urls() {
+    let server = Server::new(HashMap::new(), false);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_plavno"))
+        .arg("--stream-audio")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(
+        child.stdin.take().unwrap(),
+        "{}",
+        serde_json::json!({"url":format!("{}/missing?secret=private-token",server.url)})
+    )
+    .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Audio CDN returned HTTP 404"), "{stderr}");
+    assert!(!stderr.contains("private-token"), "{stderr}");
 }

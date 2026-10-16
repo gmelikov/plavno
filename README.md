@@ -78,7 +78,8 @@ Connect a service using the [instructions below](#services), then start playback
 with `plavno --source SOURCE`. For local music, run `plavno local /path/to/music`,
 then `plavno --source local`.
 
-Install ffmpeg and make it available on PATH for HLS playback. Browser-based
+Install ffmpeg and make it available on PATH for HLS playback and conversion of
+formats such as YouTube Opus/WebM. Browser-based
 service sign-in needs Chrome/Chromium, or Edge on Windows. These external programs
 are not included in the archives. On macOS, use `brew install ffmpeg`.
 `PLAVNO_FFMPEG` and `PLAVNO_BROWSER` override their paths.

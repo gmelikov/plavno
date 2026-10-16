@@ -129,6 +129,9 @@ YouTube web streams may need
 [rustypipe-botguard](https://codeberg.org/ThetaDev/rustypipe-botguard) on PATH,
 or `"botguard":"/absolute/path/rustypipe-botguard"` in the profile.
 Both helpers select supported full audio at the best available quality.
+YouTube Opus/WebM streams require ffmpeg on PATH, or `PLAVNO_FFMPEG` pointing to
+its executable. Playback errors distinguish conversion failures from CDN HTTP
+errors, timeouts, and TLS failures without displaying signed stream URLs.
 
 ## Diagnostics
 

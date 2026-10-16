@@ -271,7 +271,7 @@ impl Read for StreamReader {
         let count = match self.reader.read(bytes) {
             Ok(count) => count,
             Err(error) => {
-                *self.progress.error.lock().unwrap() = Some("Audio stream read error".into());
+                *self.progress.error.lock().unwrap() = Some(error.to_string());
                 return Err(error);
             }
         };
@@ -466,6 +466,7 @@ struct PipeProgress {
     len: u64,
     done: bool,
     failed: bool,
+    failure: Option<crate::stream::Failure>,
 }
 
 impl CacheState {
@@ -621,7 +622,7 @@ fn cache_chunk(
             if progress.done {
                 if progress.failed {
                     return Err(io::Error::other(
-                        "The audio adapter failed; check its dependencies and service access",
+                        progress.failure.unwrap_or(crate::stream::Failure::Failed),
                     ));
                 }
                 return Ok((offset, Arc::from([])));
@@ -719,11 +720,13 @@ pub fn cache_input(input: Input) -> Result<Arc<CachedAudio>> {
                 .args(args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null()),
+                .stderr(Stdio::piped()),
         )
         .context("Failed to start the audio adapter")?;
         let mut stdin = child.stdin.take().unwrap();
         let mut stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let diagnostics = std::thread::spawn(move || crate::stream::read_failure(stderr));
         let send = (|| -> Result<()> {
             serde_json::to_writer(&mut stdin, &request)?;
             stdin.write_all(b"\n")?;
@@ -789,8 +792,10 @@ pub fn cache_input(input: Input) -> Result<Arc<CachedAudio>> {
                         Ok(None) => std::thread::sleep(Duration::from_millis(10)),
                     }
                 };
+                let failure = diagnostics.join().ok().flatten();
                 let mut progress = stream.progress.lock().unwrap();
                 progress.failed = failed || status.is_err() || status.is_ok_and(|s| !s.success());
+                progress.failure = failure;
                 progress.done = true;
                 stream.changed.notify_all();
             })?;
@@ -1020,7 +1025,19 @@ fn prepare_segment(
     if let Some(len) = byte_len {
         builder = builder.with_byte_len(len);
     }
-    let mut decoder = builder.build().context("Failed to decode audio")?;
+    let mut decoder = builder.build().map_err(|error| {
+        let failure = cache.state.stream.as_ref().and_then(|stream| {
+            let progress = stream.progress.lock().unwrap();
+            progress
+                .failed
+                .then_some(progress.failure.unwrap_or(crate::stream::Failure::Failed))
+        });
+        let detail = failure
+            .map(|failure| failure.to_string())
+            .or_else(|| progress.error.lock().unwrap().clone())
+            .unwrap_or_else(|| error.to_string());
+        anyhow::anyhow!("Failed to decode audio: {detail}")
+    })?;
     let channels = decoder.channels();
     let sample_rate = decoder.sample_rate();
     let duration = decoder.total_duration().map(|d| d.as_secs_f64());
@@ -1272,6 +1289,52 @@ mod tests {
             1,
             "Stopped decoder retained the audio buffer"
         );
+    }
+
+    #[test]
+    fn pipe_failures_report_the_cause_without_leaking_child_stderr() {
+        for (code, expected) in [
+            ("\"missing_ffmpeg\"", "ffmpeg not found"),
+            ("{\"http\":403}", "Audio CDN returned HTTP 403"),
+            ("\"timeout\"", "Audio download timed out"),
+        ] {
+            let stderr = format!("https://cdn.example/?secret=token\nPLAVNO_STREAM_ERROR={code}");
+            #[cfg(unix)]
+            let (program, args) = (
+                "sh",
+                vec![
+                    "-c".into(),
+                    "read -r request; printf '%s\\n' \"$1\" >&2; exit 1".into(),
+                    "fixture".into(),
+                    stderr,
+                ],
+            );
+            #[cfg(windows)]
+            let (program, args) = (
+                "powershell.exe",
+                vec![
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-Command".into(),
+                    format!(
+                        "[void][Console]::ReadLine(); [Console]::Error.WriteLine('{stderr}'); exit 1"
+                    ),
+                ],
+            );
+            let buffer = cache_input(Input::Pipe {
+                program: program.into(),
+                args,
+                request: serde_json::json!({}),
+                quality: "fixture".into(),
+            })
+            .unwrap();
+            let error = super::prepare(buffer, Arc::new(AtomicBool::new(false)))
+                .err()
+                .expect("Failed pipe was decoded")
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("secret"), "{error}");
+        }
     }
 
     #[test]
