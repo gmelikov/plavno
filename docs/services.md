@@ -103,6 +103,19 @@ run `brew install yt-dlp`. On Windows, put `yt-dlp.exe` on PATH. yt-dlp is optio
 for other sources and is not included in release archives or installed by the
 Homebrew formula. `PLAVNO_YT_DLP` overrides its executable path.
 
+For full YouTube support, install a supported JavaScript runtime: **Node.js 22+**
+or **Deno 2.3+**, available on PATH. plavno passes `--js-runtimes node`, retaining
+yt-dlp's default Deno support. Older yt-dlp versions that reject this optional flag
+are retried locally without it; this happens before any service request, once per
+backend instance. Challenge failures do not trigger repeated metadata requests.
+
+You also need a matching **yt-dlp-ejs** installation. Official yt-dlp executables
+bundle it; distribution packages may provide it separately. Follow the
+[yt-dlp EJS instructions](https://github.com/yt-dlp/yt-dlp/wiki/EJS) for your
+installation method. If JavaScript challenge solving fails, `--list-formats` can
+still exit successfully while listing only images; that does not confirm that
+audio is available. plavno reports the missing solver requirement explicitly.
+
 Run `plavno login spotify` or `plavno login ytmusic` and paste a profile:
 
 | Service | Profile example | Requirements |

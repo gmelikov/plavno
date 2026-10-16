@@ -21,6 +21,7 @@ pub struct YouTube {
     program: OsString,
     seed: Option<String>,
     session: Option<Session>,
+    enable_node: bool,
     api: ureq::Agent,
     #[cfg(test)]
     api_base: Option<String>,
@@ -97,6 +98,7 @@ impl YouTube {
             program: std::env::var_os("PLAVNO_YT_DLP").unwrap_or_else(|| "yt-dlp".into()),
             seed: None,
             session: None,
+            enable_node: true,
             api: ureq::Agent::config_builder()
                 .http_status_as_error(false)
                 .max_redirects(0)
@@ -219,6 +221,7 @@ impl YouTube {
 
     fn command(&mut self) -> Result<Command> {
         let program = self.program.clone();
+        let enable_node = self.enable_node;
         #[cfg(test)]
         let fixture_directory = self.profile.parent().unwrap().to_path_buf();
         let session = self.session()?;
@@ -237,6 +240,9 @@ impl YouTube {
             "--extractor-retries",
             "0",
         ]);
+        if enable_node {
+            command.args(["--js-runtimes", "node"]);
+        }
         if let Some(cookies) = &session.cookies {
             command.arg("--cookies").arg(cookies);
         }
@@ -255,6 +261,28 @@ impl YouTube {
                 .unwrap_or(60)
                 .max(1);
             return Err(self.limit(wait)?);
+        }
+        if !success
+            && self.enable_node
+            && errors.lines().any(|line| {
+                line.trim() == "yt-dlp: error: no such option: --js-runtimes"
+                    || line.trim() == "yt-dlp: error: unrecognized arguments: --js-runtimes node"
+            })
+        {
+            // Older yt-dlp exits during argument parsing, before any network request.
+            self.enable_node = false;
+            let mut legacy = Command::new(command.get_program());
+            #[cfg(test)]
+            legacy.env("PLAVNO_YTDLP_FIXTURE_DIR", self.profile.parent().unwrap());
+            let mut args = command.get_args();
+            while let Some(arg) = args.next() {
+                if arg == "--js-runtimes" {
+                    args.next();
+                } else {
+                    legacy.arg(arg);
+                }
+            }
+            return self.execute(&mut legacy);
         }
         ensure!(success, "{}", failure(&errors));
         serde_json::from_slice(&output).context("Invalid yt-dlp JSON response; update yt-dlp")
@@ -374,6 +402,12 @@ fn http_status(errors: &str, status: u16) -> bool {
 fn failure(errors: &str) -> &'static str {
     if http_status(errors, 403) {
         "YouTube returned HTTP 403; update yt-dlp or refresh saved cookies"
+    } else if errors.contains("Requested format is not available") {
+        if errors.contains("challenge") || errors.contains("JavaScript") {
+            "YouTube audio requires a JavaScript challenge solver; install Node.js 22+ or Deno and yt-dlp-ejs (see README)"
+        } else {
+            "YouTube did not offer the requested audio format; update yt-dlp and check access to the track"
+        }
     } else if errors.contains("playlist type is unviewable") {
         "YouTube cannot open this playlist without a starting video; use --seed or choose another playlist"
     } else if errors.contains("Sign in") || errors.contains("cookies") {
@@ -703,6 +737,89 @@ mod tests {
         fixture.reply(3, json!({"entries":[]}));
         fixture.backend().start().unwrap();
         assert_eq!(fixture.calls().len(), 3);
+    }
+
+    #[test]
+    fn audio_resolution_enables_node_without_an_extra_metadata_request() {
+        let fixture = Fixture::new();
+        fixture.reply(
+            1,
+            json!({"url":"https://cdn.test/audio","protocol":"https","ext":"m4a"}),
+        );
+        let mut youtube = fixture.backend();
+        youtube
+            .resolve(&Track {
+                source: "ytmusic".into(),
+                id: "WPK0ryGJaDQ".into(),
+                title: "Track".into(),
+                artist: "Artist".into(),
+                duration: None,
+                cover_url: None,
+                genre: None,
+                batch: String::new(),
+            })
+            .unwrap();
+        let calls = fixture.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0]
+                .windows(2)
+                .any(|args| args == ["--js-runtimes", "node"])
+        );
+    }
+
+    #[test]
+    fn older_ytdlp_rejects_the_optional_runtime_flag_only_once() {
+        let fixture = Fixture::new();
+        let cookies = fixture.0.join("cookies.txt");
+        crate::config::save_private(
+            &cookies,
+            b".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tfixture-secret\n",
+        )
+        .unwrap();
+        crate::config::save_private(
+            &fixture.0.join("ytmusic.json"),
+            &serde_json::to_vec(&json!({"cookies":cookies})).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            fixture.0.join("1.err"),
+            "Usage: yt-dlp [OPTIONS] URL\n\nyt-dlp: error: no such option: --js-runtimes\n",
+        )
+        .unwrap();
+        fs::write(fixture.0.join("1.status"), "2").unwrap();
+        fixture.reply(2, json!({"entries":[{"id":"9EcDe6qS0Xc"}]}));
+        fixture.reply(3, json!({"entries":[{"id":"abcdefghijk"}]}));
+        let mut youtube = fixture.backend();
+        assert_eq!(youtube.start().unwrap().len(), 1);
+        assert_eq!(youtube.more(&[]).unwrap().len(), 1);
+        let calls = fixture.calls();
+        assert_eq!(calls.len(), 3);
+        assert!(calls[0].contains(&"--js-runtimes".into()));
+        for call in &calls[1..] {
+            assert!(!call.contains(&"--js-runtimes".into()));
+        }
+        let without_runtime: Vec<_> = calls[0]
+            .iter()
+            .filter(|arg| !["--js-runtimes", "node"].contains(&arg.as_str()))
+            .cloned()
+            .collect();
+        assert_eq!(
+            calls[1], without_runtime,
+            "Local option fallback must preserve the request and private cookie arguments"
+        );
+    }
+
+    #[test]
+    fn challenge_failures_have_actionable_errors_without_repeating_metadata_requests() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("1.err"),"WARNING: Signature solving failed\nWARNING: n challenge solving failed [private URL]\nERROR: Requested format is not available\n").unwrap();
+        fs::write(fixture.0.join("1.status"), "1").unwrap();
+        let mut youtube = fixture.backend();
+        let error = youtube.start().unwrap_err().to_string();
+        assert!(error.contains("Node.js 22+") && error.contains("yt-dlp-ejs"));
+        assert!(!error.contains("private URL"));
+        assert_eq!(fixture.calls().len(), 1);
     }
 
     #[test]

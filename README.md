@@ -126,6 +126,9 @@ A saved profile seed is also supported; `--seed` overrides it for this run.
 Install [yt-dlp](https://github.com/yt-dlp/yt-dlp#installation) separately and make it
 available on PATH. On Debian/Ubuntu, run `sudo apt install yt-dlp`; on macOS,
 run `brew install yt-dlp`. It is optional and is not bundled with plavno.
+For full YouTube support, yt-dlp also needs [yt-dlp-ejs and a JavaScript runtime](https://github.com/yt-dlp/yt-dlp/wiki/EJS):
+Node.js 22+ or Deno 2.3+. plavno enables Node.js alongside yt-dlp's default Deno
+support; install the runtime separately and put it on PATH.
 
 For public track radio, no login is needed:
 
