@@ -23,6 +23,7 @@ pub struct YouTube {
 
 struct Session {
     radio: Option<String>,
+    personal: bool,
     playlist: String,
     offset: usize,
     cookies: Option<PathBuf>,
@@ -152,6 +153,7 @@ impl YouTube {
                 Sha256::digest(cookies.as_deref().unwrap_or("public").as_bytes())
             );
             let mut session = Session {
+                personal: radio.is_none() && playlist == "RDMM",
                 radio,
                 playlist,
                 offset: 1,
@@ -177,8 +179,12 @@ impl YouTube {
 
     fn command(&mut self) -> Result<Command> {
         let program = self.program.clone();
+        #[cfg(test)]
+        let fixture_directory = self.profile.parent().unwrap().to_path_buf();
         let session = self.session()?;
         let mut command = Command::new(program);
+        #[cfg(test)]
+        command.env("PLAVNO_YTDLP_FIXTURE_DIR", fixture_directory);
         command.args([
             "--ignore-config",
             "--no-cache-dir",
@@ -229,6 +235,11 @@ impl YouTube {
     }
 
     fn wave(&mut self, history: &[String]) -> Result<Vec<Track>> {
+        if self.session()?.personal && self.session()?.radio.is_none() {
+            let home = self.playlist("https://www.youtube.com/feed/recommended", 1, 20)?;
+            let anchor = personal_anchor(&home).context("No starting video found in your YouTube recommendations; refresh YouTube cookies or use --seed")?;
+            self.session.as_mut().unwrap().radio = Some(anchor);
+        }
         let session = self.session()?;
         let seed = session.radio.clone();
         let mut address = url::Url::parse("https://www.youtube.com/watch")?;
@@ -236,7 +247,14 @@ impl YouTube {
             address
                 .query_pairs_mut()
                 .append_pair("v", seed)
-                .append_pair("list", &format!("RD{seed}"));
+                .append_pair(
+                    "list",
+                    &if session.personal {
+                        "RDMM".into()
+                    } else {
+                        format!("RD{seed}")
+                    },
+                );
             (1, 26)
         } else {
             address.set_path("/playlist");
@@ -245,16 +263,7 @@ impl YouTube {
                 .append_pair("list", &session.playlist);
             (session.offset, session.offset + 24)
         };
-        let mut command = self.command()?;
-        command.args([
-            "--flat-playlist",
-            "--yes-playlist",
-            "--playlist-items",
-            &format!("{start}:{end}"),
-            "--",
-            address.as_str(),
-        ]);
-        let value = self.execute(&mut command)?;
+        let value = self.playlist(address.as_str(), start, end)?;
         let mut seen: HashSet<String> = history.iter().cloned().collect();
         if let Some(seed) = seed {
             seen.insert(seed);
@@ -270,6 +279,55 @@ impl YouTube {
         }
         Ok(tracks)
     }
+
+    fn playlist(&mut self, address: &str, start: usize, end: usize) -> Result<Value> {
+        let mut command = self.command()?;
+        command.args([
+            "--flat-playlist",
+            "--yes-playlist",
+            "--playlist-items",
+            &format!("{start}:{end}"),
+            "--",
+            address,
+        ]);
+        self.execute(&mut command)
+    }
+}
+
+fn personal_anchor(home: &Value) -> Option<String> {
+    let entries = home["entries"].as_array()?;
+    let eligible = |entry: &&Value| {
+        !matches!(
+            entry["live_status"].as_str(),
+            Some("is_live" | "is_upcoming")
+        )
+    };
+    let anchor = |entry: &Value| {
+        entry["url"]
+            .as_str()
+            .and_then(|url| seed_id(url).ok())
+            .or_else(|| {
+                entry["id"]
+                    .as_str()
+                    .filter(|id| valid_id(id))
+                    .map(str::to_owned)
+            })
+    };
+    entries
+        .iter()
+        .filter(eligible)
+        .filter(|entry| {
+            entry["id"].as_str().is_some_and(|id| id.starts_with("RD"))
+                || entry["url"]
+                    .as_str()
+                    .and_then(|url| url::Url::parse(url).ok())
+                    .is_some_and(|url| {
+                        url.query_pairs()
+                            .any(|(key, value)| key == "list" && value.starts_with("RD"))
+                    })
+        })
+        .find_map(anchor)
+        .or_else(|| entries.iter().filter(eligible).find_map(anchor))
 }
 
 fn run(command: &mut Command) -> Result<(bool, Vec<u8>, Vec<u8>)> {
@@ -327,6 +385,8 @@ fn http_status(errors: &str, status: u16) -> bool {
 fn failure(errors: &str) -> &'static str {
     if http_status(errors, 403) {
         "YouTube returned HTTP 403; update yt-dlp or refresh saved cookies"
+    } else if errors.contains("playlist type is unviewable") {
+        "YouTube cannot open this playlist without a starting video; use --seed or choose another playlist"
     } else if errors.contains("Sign in") || errors.contains("cookies") {
         "YouTube requires sign-in; configure a private Netscape cookie file with plavno login ytmusic"
     } else if errors.contains("timed out") {
@@ -467,7 +527,7 @@ mod tests {
     use super::*;
     use std::{path::Path, sync::OnceLock};
 
-    struct Fixture(PathBuf);
+    struct Fixture(PathBuf, PathBuf);
     impl Fixture {
         fn new() -> Self {
             static EXECUTABLE: OnceLock<PathBuf> = OnceLock::new();
@@ -493,13 +553,10 @@ mod tests {
             });
             let directory = temporary_path("fixture").unwrap();
             fs::create_dir(&directory).unwrap();
-            let fixture = Self(directory);
-            fs::copy(executable, fixture.program()).unwrap();
-            fixture
+            Self(directory, executable.clone())
         }
         fn program(&self) -> PathBuf {
-            self.0
-                .join(format!("yt-dlp{}", std::env::consts::EXE_SUFFIX))
+            self.1.clone()
         }
         fn backend(&self) -> YouTube {
             let mut youtube =
@@ -526,6 +583,68 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+
+    #[test]
+    fn cookie_only_profiles_discover_an_anchor_before_opening_the_personal_mix() {
+        let fixture = Fixture::new();
+        let cookies = fixture.0.join("cookies.txt");
+        crate::config::save_private(
+            &cookies,
+            b".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tfixture-secret\n",
+        )
+        .unwrap();
+        crate::config::save_private(
+            &fixture.0.join("ytmusic.json"),
+            &serde_json::to_vec(&json!({"cookies":cookies})).unwrap(),
+        )
+        .unwrap();
+        fixture.reply(1, json!({"entries":[{"id":"abcdefghijk","title":"A recommendation"},{"id":"RDMM","url":"https://www.youtube.com/watch?v=9EcDe6qS0Xc&list=RDMM"}]}));
+        fixture.reply(
+            2,
+            json!({"entries":[{"id":"9EcDe6qS0Xc"},{"id":"5LGUgChapj4"}]}),
+        );
+        fixture.reply(
+            3,
+            json!({"entries":[{"id":"5LGUgChapj4"},{"id":"abcdefghijk"}]}),
+        );
+        let mut youtube = fixture.backend();
+        youtube.seed = None;
+        let batch = youtube.start().unwrap();
+        let calls = fixture.calls();
+        assert_eq!(
+            calls.len(),
+            2,
+            "Cookie-only playback must bootstrap the personal mix"
+        );
+        assert_eq!(
+            calls[0].last().unwrap(),
+            "https://www.youtube.com/feed/recommended"
+        );
+        assert_eq!(
+            calls[1].last().unwrap(),
+            "https://www.youtube.com/watch?v=9EcDe6qS0Xc&list=RDMM"
+        );
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].id, "5LGUgChapj4");
+        assert_eq!(
+            youtube.more(&[batch[0].id.clone()]).unwrap()[0].id,
+            "abcdefghijk"
+        );
+        let calls = fixture.calls();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls[2].last().unwrap(),
+            "https://www.youtube.com/watch?v=5LGUgChapj4&list=RDMM"
+        );
+        fixture.reply(4, json!({"entries":[]}));
+        let error = youtube.start().unwrap_err().to_string();
+        assert!(error.contains("cookies") && error.contains("--seed"));
+        assert_eq!(
+            fixture.calls().len(),
+            4,
+            "An empty home feed must not open an unanchored mix"
+        );
     }
 
     #[test]
@@ -659,6 +778,10 @@ mod tests {
         assert!(stream(&json!({"url":"file:///secret"})).is_err());
         assert!(failure("HTTP Error 403 https://cdn.test/?sig=private").contains("403"));
         assert!(!failure("https://cdn.test/?sig=private").contains("private"));
+        assert!(
+            failure("RDMM: YouTube said: This playlist type is unviewable.")
+                .contains("starting video")
+        );
         assert!(!http_status("[youtube] videoID429: loading metadata", 429));
         let Input::Http { headers, hint, .. } = stream(&json!({"url":"https://cdn.test/audio","protocol":"https","ext":"m4a","http_headers":{"Referer":"https://www.youtube.com/"}})).unwrap() else { panic!("AAC should use the native decoder") };
         assert_eq!(hint, "m4a");

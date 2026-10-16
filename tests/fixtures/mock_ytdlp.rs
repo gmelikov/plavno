@@ -1,12 +1,12 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
+    path::PathBuf,
     process,
 };
 
 fn main() {
-    let executable = std::env::current_exe().unwrap();
-    let directory = executable.parent().unwrap();
+    let directory = PathBuf::from(std::env::var_os("PLAVNO_YTDLP_FIXTURE_DIR").unwrap());
     let calls = directory.join("calls");
     let number = fs::read_to_string(&calls)
         .unwrap_or_default()

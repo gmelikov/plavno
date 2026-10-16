@@ -125,6 +125,11 @@ credentials and Premium. Select one of these sources explicitly; `--seed`
 cannot be combined with `--source mixed`, `--favorites`, or `--file`.
 Rebuild the Spotify helper when updating a source installation.
 
+With cookies alone, plavno reads up to 20 home recommendations to choose a
+starting video, preferring a mix card, then opens the personal `RDMM` mix with
+that video ID. The starting video stays in RAM; the profile is not changed.
+If the home feed is empty, refresh cookies or provide a seed or playlist.
+
 yt-dlp fetches bounded flat playlist batches and resolves audio URLs only for
 tracks selected for playback or adjacent preloading. It does not download audio.
 The existing Rust RAM cache handles download, seeking, and replay; the yt-dlp
