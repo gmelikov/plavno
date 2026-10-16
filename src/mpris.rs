@@ -96,7 +96,9 @@ impl Snapshot {
         if let Some(track) = &self.track {
             property(&mut map, "mpris:trackid", track.path.clone());
             property(&mut map, "xesam:title", track.title.clone());
-            if let Some(url) = &track.cover_url {
+            if let Some(url) = &track.cover_url
+                && !url.starts_with(crate::local_metadata::COVER_PREFIX)
+            {
                 property(&mut map, "mpris:artUrl", url.clone());
             }
             if !track.artist.is_empty() {

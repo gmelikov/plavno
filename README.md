@@ -193,7 +193,9 @@ discovery finishes; the first tracks depend on which files have been discovered.
 Tracks shuffle without repeats within a pass, then start a new pass without an
 immediate boundary repeat when more than one playable track is available. Symlinks
 are skipped. Files that cannot be opened or recognized are skipped when preparing
-the queue. Titles use filenames; duration comes from the audio header.
+the queue. Titles and artists come from embedded tags, with filenames used when
+the title is missing or blank. Embedded cover art is displayed in the TUI;
+duration comes from the audio header. Tags are read only for queued tracks.
 Press `w` to rescan and start a new shuffle. The file list stays in RAM; only the
 configured directory is saved in `~/.config/plavno/local.json`.
 

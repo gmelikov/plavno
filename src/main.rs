@@ -15,6 +15,7 @@ mod engine;
 mod flow_view;
 mod history;
 mod history_view;
+mod local_metadata;
 #[cfg(target_os = "linux")]
 mod mpris;
 #[cfg(not(target_os = "linux"))]

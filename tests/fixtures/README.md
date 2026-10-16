@@ -33,3 +33,15 @@ sox seek.flac -C 320 seek.mp3
 ```
 
 These fixtures are used only in tests and are not included in the release player.
+
+`tagged.flac`, `tagged.mp3`, `tagged.m4a` and `tagged.ogg` contain the synthetic
+silence above with UTF-8 title/artist/genre tags and a generated 4×4 PNG front
+cover. The FLAC also has a back cover before the front cover to test selection.
+`tagged-partial.flac` has a blank title, only an album artist, and no picture.
+`tagged-v1.mp3` contains only legacy ID3v1 tags. `tagged.mp3` also has conflicting
+ID3v1 tags to verify that ID3v2 takes precedence.
+Regenerate them with SoX and Python's `mutagen==1.47.0`:
+
+```sh
+python tests/fixtures/generate_metadata.py
+```

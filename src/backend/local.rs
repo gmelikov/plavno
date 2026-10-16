@@ -25,21 +25,7 @@ impl Backend for Local {
 
     fn start(&mut self) -> Result<Vec<Track>> {
         ensure!(self.0.is_file(), "Audio file not found");
-        Ok(vec![Track {
-            source: String::new(),
-            id: self.0.canonicalize()?.to_string_lossy().into(),
-            title: self
-                .0
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into(),
-            artist: String::new(),
-            duration: None,
-            cover_url: None,
-            genre: None,
-            batch: String::new(),
-        }])
+        Ok(vec![local_track(&self.0.canonicalize()?)?])
     }
 
     fn more(&mut self, _: &[String]) -> Result<Vec<Track>> {
@@ -250,20 +236,26 @@ fn supported(path: &Path) -> bool {
 
 fn local_track(path: &Path) -> Result<Track> {
     let decoder = rodio::Decoder::try_from(File::open(path)?)?;
+    let metadata = crate::local_metadata::read(path).unwrap_or_default();
+    let id: String = url::Url::from_file_path(path)
+        .map_err(|_| anyhow::anyhow!("Invalid local audio path"))?
+        .into();
     Ok(Track {
         source: String::new(),
-        id: url::Url::from_file_path(path)
-            .map_err(|_| anyhow::anyhow!("Invalid local audio path"))?
-            .into(),
-        title: path
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into(),
-        artist: String::new(),
+        cover_url: metadata
+            .cover
+            .as_ref()
+            .map(|_| format!("{}{id}", crate::local_metadata::COVER_PREFIX)),
+        id,
+        title: metadata.title.unwrap_or_else(|| {
+            path.file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into()
+        }),
+        artist: metadata.artist.unwrap_or_default(),
         duration: decoder.total_duration().map(|d| d.as_secs_f64()),
-        cover_url: None,
-        genre: None,
+        genre: metadata.genre,
         batch: String::new(),
     })
 }
@@ -333,6 +325,71 @@ mod tests {
             .unwrap();
         assert!(!timeout.timed_out(), "Local scanner did not finish");
         assert!(data.error.is_none());
+    }
+
+    #[test]
+    fn directory_and_single_file_read_tags_and_embedded_covers_for_supported_formats() {
+        let library = Library::new();
+        for extension in ["flac", "mp3", "m4a", "ogg"] {
+            let path = library.0.join(format!("filename.{extension}"));
+            fs::copy(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("tests/fixtures/tagged.{extension}")),
+                &path,
+            )
+            .unwrap();
+            let track = Local(path.clone()).start().unwrap().remove(0);
+            assert_eq!(track.title, "Тестовый трек", "{extension}");
+            assert_eq!(track.artist, "Исполнитель", "{extension}");
+            assert_eq!(track.genre.as_deref(), Some("Instrumental"), "{extension}");
+            assert_eq!(track_path(&track).unwrap(), path);
+            let cover = format!("{}{}", crate::local_metadata::COVER_PREFIX, track.id);
+            assert_eq!(
+                track.cover_url.as_deref(),
+                Some(cover.as_str()),
+                "{extension}"
+            );
+        }
+        let mut directory = LocalDirectory::new(library.0.clone()).unwrap();
+        directory.scan =
+            Some(Scan::start(library.0.clone(), directory.random.try_clone().unwrap()).unwrap());
+        wait_for_scan(directory.scan.as_ref().unwrap());
+        let tracks = directory.next_batch().unwrap();
+        assert_eq!(tracks.len(), 4);
+        assert!(tracks.iter().all(|track| {
+            track.title == "Тестовый трек"
+                && track.artist == "Исполнитель"
+                && track.cover_url.is_some()
+        }));
+    }
+
+    #[test]
+    fn legacy_id3v1_tags_are_read_when_no_modern_tags_are_present() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged-v1.mp3");
+        let track = Local(path).start().unwrap().remove(0);
+        assert_eq!(track.title, "Legacy title");
+        assert_eq!(track.artist, "Legacy artist");
+        assert!(track.cover_url.is_none());
+    }
+
+    #[test]
+    fn missing_or_blank_title_falls_back_to_filename_and_album_artist_is_accepted() {
+        let library = Library::new();
+        let untagged = library.track("without tags.flac");
+        let track = Local(untagged).start().unwrap().remove(0);
+        assert_eq!(track.title, "without tags");
+        assert!(track.artist.is_empty());
+        assert!(track.cover_url.is_none());
+        let path = library.0.join("blank title.flac");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged-partial.flac"),
+            &path,
+        )
+        .unwrap();
+        let track = local_track(&path).unwrap();
+        assert_eq!(track.title, "blank title");
+        assert_eq!(track.artist, "Исполнитель альбома");
+        assert!(track.cover_url.is_none());
     }
 
     #[test]

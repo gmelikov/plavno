@@ -169,6 +169,11 @@ impl Drop for Artwork {
 }
 
 fn fetch(http: &ureq::Agent, url: &str) -> Option<RgbImage> {
+    if let Some(file_url) = url.strip_prefix(crate::local_metadata::COVER_PREFIX) {
+        let path = url::Url::parse(file_url).ok()?.to_file_path().ok()?;
+        let metadata = crate::local_metadata::read(&path).ok()?;
+        return decode(metadata.cover.as_deref()?);
+    }
     let url = url::Url::parse(url).ok()?;
     if !matches!(url.scheme(), "http" | "https") {
         return None;
@@ -278,6 +283,53 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn worker_loads_embedded_front_covers_and_reuses_them_after_hiding() {
+        use std::time::Instant;
+        for extension in ["flac", "mp3", "m4a", "ogg"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("tests/fixtures/tagged.{extension}"));
+            let url = format!(
+                "{}{}",
+                crate::local_metadata::COVER_PREFIX,
+                url::Url::from_file_path(path).unwrap()
+            );
+            let mut artwork = Artwork::new().unwrap();
+            let start = Instant::now();
+            while artwork.image.is_none() {
+                artwork.update(Some(&url));
+                assert!(start.elapsed() < Duration::from_secs(3), "{extension}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let image = artwork.image.as_ref().unwrap().clone();
+            assert_eq!(image.dimensions(), (192, 192), "{extension}");
+            assert_eq!(image.get_pixel(0, 0).0, [20, 40, 60], "{extension}");
+            artwork.update(None);
+            artwork.update(Some(&url));
+            assert!(Arc::ptr_eq(&image, artwork.image.as_ref().unwrap()));
+            assert!(artwork.submitted.is_none());
+        }
+    }
+
+    #[test]
+    fn invalid_local_cover_references_and_files_without_covers_do_not_produce_artwork() {
+        let http = ureq::agent();
+        for url in [
+            "embedded:not a URL",
+            "embedded:file:///nonexistent/plavno.flac",
+        ] {
+            assert!(fetch(&http, url).is_none());
+        }
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/silence.flac");
+        let url = format!(
+            "{}{}",
+            crate::local_metadata::COVER_PREFIX,
+            url::Url::from_file_path(path).unwrap()
+        );
+        assert!(fetch(&http, &url).is_none());
     }
 
     #[test]

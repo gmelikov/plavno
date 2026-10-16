@@ -1351,6 +1351,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "signal-hook",
+ "symphonia",
+ "symphonia-metadata",
  "time",
  "unicode-segmentation",
  "unicode-width",
