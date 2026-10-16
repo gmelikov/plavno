@@ -30,7 +30,41 @@ A lightweight TUI player for Linux, macOS and Windows with music streams from po
 
 ## Quick start
 
-Install from crates.io with Rust. Linux also requires pkg-config, ALSA and D-Bus headers:
+Download a prebuilt archive from [GitHub Releases](https://github.com/gmelikov/plavno/releases).
+Each archive includes `plavno`, `plavno-spotify`, and `plavno-youtube`, plus this
+README and the license. Rust and a C/C++ toolchain are not required to run them.
+
+| Platform | Archive suffix | Runtime prerequisites |
+|---|---|---|
+| Linux x86_64 / ARM64 | `linux-x86_64-gnu.tar.gz` / `linux-aarch64-gnu.tar.gz` | glibc 2.35+, ALSA, D-Bus |
+| macOS Apple Silicon / Intel | `macos-aarch64.tar.gz` / `macos-x86_64.tar.gz` | Native builds checked on macOS 15 |
+| Windows 10/11 x64 | `windows-x86_64-msvc.zip` | C runtime is linked statically |
+
+Extract the archive and put **all three executables** in a directory on PATH
+(`~/.local/bin` is a common choice on Linux). On Windows, add the extracted folder
+to your user PATH and open a new terminal. Then run `plavno sources`.
+
+Linux requires `libasound.so.2` and `libdbus-1.so.3`. Install the runtime packages
+for your distribution; development headers are only needed when building from source:
+
+```sh
+# Debian / Ubuntu (on newer Ubuntu releases, use libasound2t64 instead of libasound2)
+sudo apt install libasound2 libdbus-1-3
+# Fedora
+sudo dnf install alsa-lib dbus-libs
+# Arch Linux
+sudo pacman -S alsa-lib dbus
+```
+
+Audio uses the ALSA default device; PipeWire/PulseAudio needs its ALSA plugin
+(for example `pipewire-alsa` or `pulseaudio-alsa` on Arch). A desktop D-Bus session
+enables media keys and Now Playing. Alpine/musl requires a separate source build.
+
+Install ffmpeg and make it available on PATH for HLS playback. Browser-based
+service sign-in needs Chrome/Chromium, or Edge on Windows. These external programs
+are not included in the archives. `PLAVNO_FFMPEG` and `PLAVNO_BROWSER` override their paths.
+
+Alternatively, install the player from crates.io with Rust:
 
 ```sh
 cargo install plavno --locked
@@ -40,15 +74,10 @@ plavno sources
 Build dependencies: `libasound2-dev libdbus-1-dev` on Debian/Ubuntu, or
 `alsa-lib-devel dbus-devel` on Fedora.
 
-Alternatively, download a binary from [GitHub Releases](https://github.com/gmelikov/plavno/releases).
-Linux x86_64 and ARM64 (`aarch64`) builds require glibc 2.35+, `libasound.so.2`, and `libdbus-1.so.3`
-(`libasound2` / `libasound2t64` and `libdbus-1-3` on Debian/Ubuntu). Extract the archive
-and run `./plavno`, or place it in `~/.local/bin`.
+Cargo installation builds only the player; build the Spotify and YouTube helpers
+separately as described in the [service setup instructions](docs/services.md#spotify-and-youtube-music).
 
-Audio uses the ALSA default device; PipeWire/PulseAudio needs its ALSA plugin.
-Install ffmpeg for HLS playback. Optional Spotify and YouTube helpers are built separately.
-
-On macOS, build from the checkout below after installing Rust and Xcode Command
+To build on macOS, use the checkout below after installing Rust and Xcode Command
 Line Tools (`xcode-select --install`). Playback uses the CoreAudio default output;
 ALSA and D-Bus are not required. Install ffmpeg with `brew install ffmpeg` for HLS.
 Chrome/Chromium is detected in `/Applications`, `~/Applications`, or PATH.
@@ -57,7 +86,7 @@ integration handles play/pause, stop, next/previous, position and playback speed
 it runs without a Dock icon or a separate window. Sixel rendering needs a terminal with sixel support;
 the default braille renderer works without it.
 
-On Windows 10/11, install Rust with the MSVC toolchain and Visual Studio Build
+To build on Windows 10/11, install Rust with the MSVC toolchain and Visual Studio Build
 Tools (Desktop development with C++). Build with `cargo build --release` and run
 `.\target\release\plavno.exe` in Windows Terminal. Playback uses the WASAPI
 default output. System Media Transport Controls handle play/pause, stop,
