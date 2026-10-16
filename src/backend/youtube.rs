@@ -10,6 +10,7 @@ use std::{
     io::{self, Read, Write},
     path::PathBuf,
     process::{Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -26,6 +27,16 @@ struct Session {
     offset: usize,
     cookies: Option<PathBuf>,
     account: String,
+}
+
+fn temporary_path(kind: &str) -> Result<PathBuf> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    Ok(std::env::temp_dir().join(format!(
+        "plavno-ytdlp-{kind}-{}-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
+    )))
 }
 
 impl Drop for Session {
@@ -149,11 +160,7 @@ impl YouTube {
             };
             if let Some(cookies) = cookies {
                 let cookies = web::Cookies::parse(&cookies)?.netscape();
-                let directory = std::env::temp_dir().join(format!(
-                    "plavno-ytdlp-{}-{}",
-                    std::process::id(),
-                    SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-                ));
+                let directory = temporary_path("cookies")?;
                 fs::create_dir(&directory)?;
                 session.cookies = Some(directory.join("cookies.txt"));
                 plavno_platform::private_directory(&directory)?;
@@ -484,14 +491,7 @@ mod tests {
                 );
                 output
             });
-            let directory = std::env::temp_dir().join(format!(
-                "plavno-ytdlp-fixture-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+            let directory = temporary_path("fixture").unwrap();
             fs::create_dir(&directory).unwrap();
             let fixture = Self(directory);
             fs::copy(executable, fixture.program()).unwrap();
