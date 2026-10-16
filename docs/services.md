@@ -151,6 +151,10 @@ yt-dlp fetches bounded flat playlist batches and resolves audio URLs only for
 tracks selected for playback or adjacent preloading. It does not download audio.
 The existing Rust RAM cache handles download, seeking, and replay; the yt-dlp
 process exits after each metadata request. No signed URL cache is written to disk.
+Before downloading, plavno honors yt-dlp's `available_at` timestamp for the selected
+audio format. Some YouTube streams reject early downloads with HTTP 403; waiting
+does not require another metadata request or a CDN probe. A wait longer than two
+minutes is reported as unavailable instead of keeping playback pending.
 HTTP 429 pauses further metadata and likes requests, with a private account-scoped cooldown
 that survives restarts. Update yt-dlp if YouTube changes break extraction.
 

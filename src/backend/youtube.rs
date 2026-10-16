@@ -559,7 +559,22 @@ impl Backend for YouTube {
             &format!("https://www.youtube.com/watch?v={}", track.id),
         ]);
         let value = self.execute(&mut command)?;
-        stream(&value)
+        let input = stream(&value)?;
+        if let Some(available_at) = value["available_at"].as_f64() {
+            let timestamp = Duration::try_from_secs_f64(available_at)
+                .ok()
+                .and_then(|duration| UNIX_EPOCH.checked_add(duration))
+                .context("Invalid YouTube audio availability time")?;
+            if let Ok(wait) = timestamp.duration_since(SystemTime::now()) {
+                ensure!(
+                    wait <= Duration::from_secs(120),
+                    "YouTube audio is not available yet; retry later"
+                );
+                // yt-dlp waits for this deadline before downloading; early CDN requests can get 403.
+                std::thread::sleep(wait);
+            }
+        }
+        Ok(input)
     }
 
     fn feedback(&mut self, _: &Track, _: Feedback, _: f64) -> Result<()> {
@@ -736,6 +751,59 @@ mod tests {
         crate::config::save_private(&path, &serde_json::to_vec(&state).unwrap()).unwrap();
         fixture.reply(3, json!({"entries":[]}));
         fixture.backend().start().unwrap();
+        assert_eq!(fixture.calls().len(), 3);
+    }
+
+    #[test]
+    fn audio_resolution_waits_for_the_selected_format_without_another_request() {
+        let fixture = Fixture::new();
+        let mut youtube = fixture.backend();
+        let track: Track = serde_json::from_value(json!({
+            "id":"WUvUnhQwLEU", "title":"Track", "artist":"Artist", "duration":null
+        }))
+        .unwrap();
+        for (index, ext) in ["m4a", "webm"].into_iter().enumerate() {
+            let ready = SystemTime::now() + Duration::from_millis(300);
+            fixture.reply(
+                index + 1,
+                json!({
+                    "url":"https://cdn.test/audio?sig=private", "protocol":"https", "ext":ext,
+                    "available_at":ready.duration_since(UNIX_EPOCH).unwrap().as_secs_f64()
+                }),
+            );
+            youtube.resolve(&track).unwrap();
+            assert!(
+                SystemTime::now() >= ready,
+                "Audio was handed to the downloader before YouTube allowed playback"
+            );
+        }
+        assert_eq!(fixture.calls().len(), 2);
+    }
+
+    #[test]
+    fn invalid_availability_times_fail_without_retries_or_disclosing_the_url() {
+        let fixture = Fixture::new();
+        let mut youtube = fixture.backend();
+        let track: Track = serde_json::from_value(json!({
+            "id":"WUvUnhQwLEU", "title":"Track", "artist":"Artist", "duration":null
+        }))
+        .unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        for (index, available_at) in [-1.0, 1e100, now + 180.0].into_iter().enumerate() {
+            fixture.reply(
+                index + 1,
+                json!({
+                    "url":"https://cdn.test/audio?sig=private", "protocol":"https", "ext":"webm",
+                    "available_at":available_at
+                }),
+            );
+            let error = youtube.resolve(&track).err().unwrap().to_string();
+            assert!(error.contains("availability time") || error.contains("retry later"));
+            assert!(!error.contains("private"));
+        }
         assert_eq!(fixture.calls().len(), 3);
     }
 
