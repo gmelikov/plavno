@@ -26,14 +26,39 @@ fn authorization(cookies: &str, now: u64) -> Result<String> {
     ))
 }
 
-// Only inspect the selected track's renderer, never the adjacent recommendations.
+fn like_status(value: &Value) -> Option<bool> {
+    match value.as_str()? {
+        "LIKE" => Some(true),
+        "INDIFFERENT" | "DISLIKE" => Some(false),
+        _ => None,
+    }
+}
+
+// A modern overlay has no video ID of its own; bind it to the current endpoint.
 fn selected_rating(value: &Value, id: &str) -> Option<bool> {
+    if value
+        .pointer("/currentVideoEndpoint/watchEndpoint/videoId")
+        .and_then(Value::as_str)
+        == Some(id)
+        && let Some(overlay) = value.pointer("/playerOverlays/playerOverlayRenderer")
+        && let Some(entity) = find(overlay, "likeStatusEntity")
+        && let Some(liked) = like_status(&entity["likeStatus"])
+    {
+        return Some(liked);
+    }
     match value {
         Value::Object(object) => {
+            if let Some(button) = object.get("likeButtonRenderer")
+                && button.pointer("/target/videoId").and_then(Value::as_str) == Some(id)
+                && let Some(liked) = like_status(&button["likeStatus"])
+            {
+                return Some(liked);
+            }
             if let Some(track) = object.get("playlistPanelVideoRenderer")
                 && track["videoId"].as_str() == Some(id)
+                && let Some(liked) = rating(track)
             {
-                return rating(track);
+                return Some(liked);
             }
             object.values().find_map(|v| selected_rating(v, id))
         }
@@ -242,8 +267,18 @@ impl YouTube {
             value.is_object() && value.get("error").is_none(),
             "YouTube rejected the likes request; refresh saved cookies"
         );
+        let logged_out = value
+            .pointer("/responseContext/serviceTrackingParams")
+            .and_then(Value::as_array)
+            .is_some_and(|services| {
+                services
+                    .iter()
+                    .filter_map(|service| service["params"].as_array())
+                    .flatten()
+                    .any(|p| p["key"] == "logged_in" && p["value"] == "0")
+            });
         ensure!(
-            find(&value, "loggedOut").and_then(Value::as_bool) != Some(true),
+            !logged_out && find(&value, "loggedOut").and_then(Value::as_bool) != Some(true),
             "YouTube likes require sign-in; refresh saved cookies"
         );
         Ok(value)
@@ -268,7 +303,7 @@ impl YouTube {
         }
         let value = self.api(
             "next",
-            json!({"videoId":track.id,"isAudioOnly":true,"enablePersistentPlaylistPanel":true}),
+            json!({"videoId":track.id,"playlistId":format!("RDAMVM{}",track.id),"isAudioOnly":true,"enablePersistentPlaylistPanel":true,"tunerSettingValue":"AUTOMIX_SETTING_NORMAL","watchEndpointMusicSupportedConfigs":{"watchEndpointMusicConfig":{"hasPersistentPlaylistPanel":true,"musicVideoType":"MUSIC_VIDEO_TYPE_ATV"}}}),
         )?;
         let liked = selected_rating(&value, &track.id)
             .context("YouTube did not return this track's like state")?;
@@ -462,6 +497,24 @@ mod tests {
     }
 
     #[test]
+    fn player_overlays_expose_ratings_outside_the_playlist_panel() {
+        let legacy = json!({"playerOverlays":{"playerOverlayRenderer":{"actions":[{"likeButtonRenderer":{"target":{"videoId":"5LGUgChapj4"},"likeStatus":"LIKE"}}]}}});
+        assert_eq!(selected_rating(&legacy, "5LGUgChapj4"), Some(true));
+        assert_eq!(selected_rating(&legacy, "abcdefghijk"), None);
+        let mut modern = json!({
+            "currentVideoEndpoint":{"watchEndpoint":{"videoId":"5LGUgChapj4"}},
+            "playerOverlays":{"playerOverlayRenderer":{"videoActionBar":{"videoActionBarViewModel":{"buttons":[{"buttonViewModel":{"segmentedLikeDislikeButtonViewModel":{"likeButtonViewModel":{"likeButtonViewModel":{"likeStatusEntity":{"key":"opaque-key","likeStatus":"INDIFFERENT"}}}}}}]}}}},
+            "frameworkUpdates":{"entityBatchUpdate":{"mutations":[{"payload":{"likeStatusEntity":{"key":"unrelated-key","likeStatus":"LIKE"}}}]}}
+        });
+        assert_eq!(selected_rating(&modern, "5LGUgChapj4"), Some(false));
+        assert_eq!(selected_rating(&modern, "abcdefghijk"), None);
+        modern["playerOverlays"]["playerOverlayRenderer"]["videoActionBar"]["videoActionBarViewModel"]
+            ["buttons"][0]["buttonViewModel"]["segmentedLikeDislikeButtonViewModel"]["likeButtonViewModel"]
+            ["likeButtonViewModel"]["likeStatusEntity"]["likeStatus"] = json!("DISLIKE");
+        assert_eq!(selected_rating(&modern, "5LGUgChapj4"), Some(false));
+    }
+
+    #[test]
     fn selected_track_state_is_cached_and_only_confirmed_mutations_change_it() {
         let fixture = Fixture::new();
         let mut youtube = account(&fixture);
@@ -599,6 +652,27 @@ mod tests {
         assert_eq!(body(&requests[0])["browseId"], "VLLM");
         assert_eq!(body(&requests[1])["continuation"], "page2");
         assert!(fixture.calls().is_empty());
+    }
+
+    #[test]
+    fn guest_service_tracking_cannot_be_cached_as_the_accounts_like_state() {
+        let fixture = Fixture::new();
+        let mut youtube = account(&fixture);
+        let (base, worker) = server(vec![(
+            200,
+            json!({
+                "responseContext":{"serviceTrackingParams":[{"service":"GFEEDBACK","params":[{"key":"logged_in","value":"0"}]}]},
+                "playerOverlays":{"playerOverlayRenderer":{"actions":[{"likeButtonRenderer":{"target":{"videoId":"5LGUgChapj4"},"likeStatus":"INDIFFERENT"}}]}}
+            }),
+        )]);
+        youtube.api_base = Some(base);
+        let error = youtube
+            .favorite_state(&track("5LGUgChapj4"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sign-in") && error.contains("cookies"));
+        assert!(youtube.session().unwrap().liked.is_empty());
+        assert_eq!(worker.join().unwrap().len(), 1);
     }
 
     #[test]
