@@ -18,7 +18,7 @@ A lightweight TUI player for Linux, macOS and Windows with music streams from po
   Windows, with track information, album artwork, playback position and speed.
 - **Service waves and shuffle** — Yandex My Vibe, VK recommendations, library shuffle,
   and Wave Shuffle across connected services.
-- **Likes and dislikes** — like/unlike in Yandex or VK, exclude unwanted tracks, and undo dislikes.
+- **Likes and dislikes** — like/unlike in Yandex, VK or YouTube Music, exclude unwanted tracks, and undo dislikes.
 - **Mouse and hotkeys** — click controls, drag to seek, scroll for volume, and select track text to copy.
 - **Listening history** — search past plays by title or artist and replay tracks.
 - **RAM buffering and prefetch** — start playback while downloading; cache adjacent tracks for seeking and replay.
@@ -92,7 +92,7 @@ are not included in the archives. On macOS, use `brew install ffmpeg`.
 | VK Music | `vk` | 🟢 | Recommendations, My Music shuffle, flow presets | Installed Chrome/Chromium or manual session import |
 | SoundCloud | `soundcloud` | — | Track stations | Browser sign-in or a public seed track |
 | Spotify | `spotify` | — | Track radio | Optional Rust helper; Premium and OAuth |
-| YouTube Music | `ytmusic` | — | Home mixes and track radio | External yt-dlp; cookies or a public seed |
+| YouTube Music | `ytmusic` | — | Home mixes, track radio and Liked Music shuffle | External yt-dlp; cookies or a public seed |
 | Local music | `local` | — | Recursive directory shuffle | A local music directory |
 
 ### Yandex Music
@@ -138,6 +138,10 @@ For personal mixes, run `plavno login ytmusic` and paste
 then start with `plavno --source ytmusic`.
 `--seed` uses any saved credentials and overrides the saved seed or mix for this
 run without changing the profile. Live streams are not supported.
+With signed-in cookies, `l` toggles the track's YouTube like. Press `f` to shuffle
+YouTube Music's **Liked Music**, or start with `plavno --source ytmusic --favorites`.
+This uses the music playlist, rather than YouTube's general Liked videos list.
+Press `w` to return to radio. Likes also work for YouTube tracks in `mixed`.
 
 Homebrew and release archives include the Spotify helper. Cargo installations need
 [separate helper builds](docs/services.md#spotify-and-youtube-music).
@@ -173,7 +177,7 @@ Buttons display their hotkeys and support mouse clicks.
 | Home / End | Start / end of track |
 | + / - | Volume; also click beside the percentage |
 | [ / ] | Playback speed: 0.1–2x, step 0.05; click buttons or scroll over Speed |
-| l | Like / unlike in Yandex favorites or VK My Music |
+| l | Like / unlike in Yandex, VK or YouTube Music |
 | d / u | Dislike and skip / undo dislike |
 | h or / | History: type to search, ↑/↓ select, Enter play |
 | s / m | Choose a service / mix service waves |
@@ -269,7 +273,7 @@ cargo install plavno --locked
 
 Or run `cargo build --release` from a checkout. The executable is
 `target/release/plavno` (`target\release\plavno.exe` on Windows).
-Build the Spotify and YouTube helpers separately using the
+Build the Spotify helper separately using the
 [service setup instructions](docs/services.md#spotify-and-youtube-music).
 For development, use `cargo run` or `cargo check` and keep the build cache.
 

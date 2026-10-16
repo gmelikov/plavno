@@ -1,10 +1,12 @@
+mod likes;
+
 use super::{Backend, Feedback, Input, RateLimited, Track, web};
 use anyhow::{Context, Result, ensure};
 use plavno_platform::process::Process;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     ffi::OsString,
     fs,
     io::{self, Read, Write},
@@ -19,6 +21,9 @@ pub struct YouTube {
     program: OsString,
     seed: Option<String>,
     session: Option<Session>,
+    api: ureq::Agent,
+    #[cfg(test)]
+    api_base: Option<String>,
 }
 
 struct Session {
@@ -28,6 +33,10 @@ struct Session {
     offset: usize,
     cookies: Option<PathBuf>,
     account: String,
+    auth_user: String,
+    liked: VecDeque<(String, bool)>,
+    favorites: Option<VecDeque<Track>>,
+    favorites_last: Option<String>,
 }
 
 fn temporary_path(kind: &str) -> Result<PathBuf> {
@@ -88,6 +97,14 @@ impl YouTube {
             program: std::env::var_os("PLAVNO_YT_DLP").unwrap_or_else(|| "yt-dlp".into()),
             seed: None,
             session: None,
+            api: ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .max_redirects(0)
+                .timeout_global(Some(Duration::from_secs(20)))
+                .build()
+                .into(),
+            #[cfg(test)]
+            api_base: None,
         }
     }
 
@@ -127,10 +144,21 @@ impl YouTube {
                         .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
                 "Invalid YouTube playlist ID"
             );
+            let mut auth_user = config["auth_user"].as_str().unwrap_or("0").to_owned();
             let cookies = if let Some(path) = config["cookies"].as_str() {
                 Some(web::private(std::path::Path::new(path))?)
             } else if let Some(path) = config["headers"].as_str() {
                 let headers = web::profile(std::path::Path::new(path))?;
+                if let Some(value) = headers
+                    .as_object()
+                    .and_then(|h| {
+                        h.iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("x-goog-authuser"))
+                    })
+                    .and_then(|(_, v)| v.as_str())
+                {
+                    auth_user = value.to_owned();
+                }
                 let header = headers
                     .as_object()
                     .and_then(|headers| {
@@ -140,7 +168,7 @@ impl YouTube {
                     })
                     .and_then(|(_, value)| value.as_str())
                     .context("Browser headers must contain a Cookie header")?;
-                Some(web::Cookies::from_header(header, "https://www.youtube.com/")?.netscape())
+                Some(web::Cookies::from_header(header, "https://youtube.com/")?.netscape())
             } else {
                 None
             };
@@ -148,10 +176,18 @@ impl YouTube {
                 radio.is_some() || config["playlist"].is_string() || cookies.is_some(),
                 "Configure a YouTube seed or playlist with plavno login ytmusic, or use --seed"
             );
-            let account = format!(
-                "{:x}",
-                Sha256::digest(cookies.as_deref().unwrap_or("public").as_bytes())
+            ensure!(
+                !auth_user.is_empty()
+                    && auth_user.len() <= 10
+                    && auth_user.bytes().all(|b| b.is_ascii_digit()),
+                "Invalid YouTube account index"
             );
+            let mut digest = Sha256::new();
+            digest.update(cookies.as_deref().unwrap_or("public"));
+            if auth_user != "0" {
+                digest.update(format!(":{auth_user}"));
+            }
+            let account = format!("{:x}", digest.finalize());
             let mut session = Session {
                 personal: radio.is_none() && playlist == "RDMM",
                 radio,
@@ -159,6 +195,10 @@ impl YouTube {
                 offset: 1,
                 cookies: None,
                 account,
+                auth_user,
+                liked: VecDeque::new(),
+                favorites: None,
+                favorites_last: None,
             };
             if let Some(cookies) = cookies {
                 let cookies = web::Cookies::parse(&cookies)?.netscape();
@@ -204,17 +244,7 @@ impl YouTube {
     }
 
     fn execute(&mut self, command: &mut Command) -> Result<Value> {
-        let account = self.session()?.account.clone();
-        let cooldown = self.profile.with_file_name("ytmusic-backoff.json");
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        if let Ok(state) = web::profile(&cooldown)
-            && state["account"].as_str() == Some(&account)
-            && let Some(until) = state["until"].as_u64().filter(|until| *until > now)
-        {
-            return Err(
-                RateLimited::for_service("YouTube", Duration::from_secs(until - now)).into(),
-            );
-        }
+        self.check_cooldown()?;
         let (success, output, errors) = run(command)?;
         let errors = String::from_utf8_lossy(&errors);
         if http_status(&errors, 429) {
@@ -224,11 +254,7 @@ impl YouTube {
                 .and_then(|c| c[1].parse::<u64>().ok())
                 .unwrap_or(60)
                 .max(1);
-            crate::config::save_private(
-                &cooldown,
-                &serde_json::to_vec(&json!({"account":account,"until":now.saturating_add(wait)}))?,
-            )?;
-            return Err(RateLimited::for_service("YouTube", Duration::from_secs(wait)).into());
+            return Err(self.limit(wait)?);
         }
         ensure!(success, "{}", failure(&errors));
         serde_json::from_slice(&output).context("Invalid yt-dlp JSON response; update yt-dlp")
@@ -493,6 +519,24 @@ impl Backend for YouTube {
     fn name(&self) -> &'static str {
         "YouTube Music"
     }
+    fn supports_favorites(&self) -> bool {
+        Self::has_favorites_profile(&self.profile)
+    }
+    fn supports_favorites_shuffle(&self) -> bool {
+        self.supports_favorites()
+    }
+    fn favorite_state(&mut self, track: &Track) -> Result<Option<bool>> {
+        if !self.supports_favorites() {
+            return Ok(None);
+        }
+        self.read_rating(track)
+    }
+    fn toggle_favorite(&mut self, track: &Track) -> Result<bool> {
+        self.rate(track)
+    }
+    fn start_mode(&mut self, mode: super::PlaybackMode) -> Result<Vec<Track>> {
+        self.start_favorites(mode)
+    }
     fn suspend(&mut self) {
         self.session = None;
     }
@@ -501,7 +545,11 @@ impl Backend for YouTube {
         self.wave(&[])
     }
     fn more(&mut self, history: &[String]) -> Result<Vec<Track>> {
-        self.wave(history)
+        if self.session()?.favorites.is_some() {
+            self.favorite_batch(history)
+        } else {
+            self.wave(history)
+        }
     }
     fn resolve(&mut self, track: &Track) -> Result<Input> {
         ensure!(valid_id(&track.id), "Invalid YouTube video ID");
@@ -527,9 +575,9 @@ mod tests {
     use super::*;
     use std::{path::Path, sync::OnceLock};
 
-    struct Fixture(PathBuf, PathBuf);
+    pub(super) struct Fixture(pub(super) PathBuf, PathBuf);
     impl Fixture {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             static EXECUTABLE: OnceLock<PathBuf> = OnceLock::new();
             let executable = EXECUTABLE.get_or_init(|| {
                 let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -558,7 +606,7 @@ mod tests {
         fn program(&self) -> PathBuf {
             self.1.clone()
         }
-        fn backend(&self) -> YouTube {
+        pub(super) fn backend(&self) -> YouTube {
             let mut youtube =
                 YouTube::new(self.0.join("ytmusic.json")).with_seed(Some("5LGUgChapj4"));
             youtube.program = self.program().into_os_string();
@@ -571,7 +619,7 @@ mod tests {
             )
             .unwrap();
         }
-        fn calls(&self) -> Vec<Vec<String>> {
+        pub(super) fn calls(&self) -> Vec<Vec<String>> {
             fs::read_to_string(self.0.join("calls"))
                 .unwrap_or_default()
                 .lines()

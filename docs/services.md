@@ -134,8 +134,25 @@ yt-dlp fetches bounded flat playlist batches and resolves audio URLs only for
 tracks selected for playback or adjacent preloading. It does not download audio.
 The existing Rust RAM cache handles download, seeking, and replay; the yt-dlp
 process exits after each metadata request. No signed URL cache is written to disk.
-HTTP 429 pauses further metadata requests, with a private account-scoped cooldown
+HTTP 429 pauses further metadata and likes requests, with a private account-scoped cooldown
 that survives restarts. Update yt-dlp if YouTube changes break extraction.
+
+With signed-in YouTube cookies, `l` reads and toggles the track's like in your
+account, including while playing `mixed`. Public radio without cookies has no
+likes. If the export lacks `SAPISID` or `__Secure-3PAPISID`, or YouTube rejects the
+session, refresh the export. For multiple Google accounts, the optional profile
+field `"auth_user":"1"` selects the account index; the default is `"0"`. Legacy
+browser headers retain their `X-Goog-AuthUser` selection.
+
+Press `f`, or run `plavno --source ytmusic --favorites`, to shuffle YouTube Music's
+**Liked Music** (`LM`). This does not load YouTube's general Liked videos (`LL`).
+Music videos in Liked Music are included; podcast episodes and unavailable entries
+are skipped. The player loads paginated metadata into RAM and shuffles the whole
+collection, with a limit of 100,000 tracks. Audio still loads only for playback and
+adjacent preloading. Each new shuffle cycle refreshes the collection; `f` restarts
+it manually, and `w` returns to radio. A single selected service is required for
+Favorites Shuffle. Like states are cached in RAM, and changes appear only after
+YouTube accepts the request. No likes requests are retried automatically.
 
 YouTube Opus/WebM streams require ffmpeg on PATH, or `PLAVNO_FFMPEG` pointing to
 its executable. Playback errors distinguish conversion failures from CDN HTTP

@@ -71,12 +71,13 @@ pub fn backends_with_overrides(
             .map(|(_, seed)| seed);
         let ready = plavno_platform::private_file(&path).unwrap_or(false)
             || (seed.is_some() && matches!(key, "ytmusic" | "soundcloud"));
+        let youtube_favorites = key == "ytmusic" && YouTube::has_favorites_profile(&path);
         services.push(Service {
             key,
             name,
             available: ready,
-            favorites: key == "vk",
-            favorites_shuffle: key == "vk",
+            favorites: key == "vk" || youtube_favorites,
+            favorites_shuffle: key == "vk" || youtube_favorites,
             wave_styles: key == "vk",
             allow_repeats: false,
             status: if seed.is_some() && ready {
