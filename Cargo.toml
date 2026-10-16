@@ -3,19 +3,20 @@ name = "plavno"
 version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "A lightweight terminal music player for Linux and macOS with service waves and library shuffle"
+description = "A lightweight terminal music player for Linux, macOS and Windows with service waves and library shuffle"
 repository = "https://github.com/gmelikov/plavno"
 readme = "README.md"
 keywords = ["music", "tui", "yandex", "vk", "player"]
 categories = ["command-line-utilities", "multimedia::audio"]
 publish = ["crates-io"]
-include = ["src/**", "tests/*.rs", "tests/fixtures/**", "docs/**", "Cargo.toml", "Cargo.lock", "LICENSE", "README.md", "intro.png"]
+include = ["src/**", "tests/*.rs", "tests/support/**", "tests/fixtures/**", "docs/**", "Cargo.toml", "Cargo.lock", "LICENSE", "README.md", "intro.png"]
 
 [features]
 test-audio = ["objc2/catch-all"]
 
 [dependencies]
 anyhow = "1"
+plavno-platform = { version = "0.1.0", path = "crates/plavno-platform" }
 aes = "0.8"
 base64 = "0.22"
 ctr = "0.9"
@@ -32,7 +33,6 @@ regex-lite = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-signal-hook = "0.3"
 symphonia = { version = "0.5.5", default-features = false, features = ["mp3", "flac", "isomp4", "ogg", "vorbis"] }
 symphonia-metadata = "0.5.5"
 time = { version = "0.3", features = ["formatting"] }
@@ -41,9 +41,15 @@ url = "2"
 unicode-segmentation = "1"
 unicode-width = "0.2"
 
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = "0.9"
 dbus-crossroads = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Foundation", "Media", "Storage_Streams", "Win32_Foundation", "Win32_System_WinRT", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_UI_Shell"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

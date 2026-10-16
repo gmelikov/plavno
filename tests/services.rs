@@ -1,4 +1,6 @@
-use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command, time::SystemTime};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::{fs, path::PathBuf, process::Command, time::SystemTime};
 
 struct ConfigDir(PathBuf);
 
@@ -102,6 +104,7 @@ fn local_directory_is_saved_privately_listed_and_can_be_overridden_without_chang
     );
     let settings = config.0.join("plavno/local.json");
     let saved = fs::read(&settings).unwrap();
+    #[cfg(unix)]
     assert_eq!(
         fs::metadata(&settings).unwrap().permissions().mode() & 0o777,
         0o600

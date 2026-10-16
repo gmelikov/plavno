@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    fs::{self, File, OpenOptions},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    fs::File,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -93,13 +92,11 @@ impl Cache {
 
     fn lock(path: &Path) -> std::io::Result<File> {
         let parent = path.parent().unwrap();
-        fs::create_dir_all(parent)?;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-        let lock = OpenOptions::new()
+        plavno_platform::private_directory(parent)?;
+        let lock = plavno_platform::private_options()
             .create(true)
             .truncate(false)
             .write(true)
-            .mode(0o600)
             .open(path.with_extension("lock"))?;
         lock.lock()?;
         Ok(lock)
@@ -227,7 +224,9 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn info() -> FileDownload {
         serde_json::from_value(
@@ -251,10 +250,12 @@ mod tests {
         assert_eq!(cache.state.entries.len(), MAX_ENTRIES);
         assert!(cache.get("0", 1100).is_none());
         let path = cache.path.clone().unwrap();
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
             0o700
@@ -272,13 +273,17 @@ mod tests {
                 .get("99", 1100)
                 .is_none()
         );
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(
-            Cache::persistent(directory.clone(), "private-account-token")
-                .get("99", 1100)
-                .is_none()
-        );
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(
+                Cache::persistent(directory.clone(), "private-account-token")
+                    .get("99", 1100)
+                    .is_none()
+            );
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(plavno_platform::private_file(&path).unwrap());
         fs::write(&path, "malformed JSON").unwrap();
         assert!(
             Cache::persistent(directory.clone(), "private-account-token")

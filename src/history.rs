@@ -3,9 +3,8 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
-    env, fs,
+    fs,
     io::Write,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -55,10 +54,7 @@ pub fn push(entries: &mut VecDeque<Entry>, entry: Entry) {
 }
 
 pub fn path() -> Result<PathBuf> {
-    let base = match env::var_os("XDG_STATE_HOME").filter(|p| !p.is_empty()) {
-        Some(path) => PathBuf::from(path),
-        None => PathBuf::from(env::var_os("HOME").context("HOME is not set")?).join(".local/state"),
-    };
+    let base = plavno_platform::state_home()?;
     Ok(base.join("plavno/history.json"))
 }
 
@@ -82,23 +78,21 @@ pub fn load(path: &Path) -> Result<VecDeque<Entry>> {
 
 pub fn save_entry(path: &Path, entry: Entry) -> Result<()> {
     let parent = path.parent().context("The history directory is not set")?;
-    fs::create_dir_all(parent)?;
-    let lock = fs::OpenOptions::new()
+    plavno_platform::private_directory(parent)?;
+    let lock = plavno_platform::private_options()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .mode(0o600)
         .open(parent.join("history.lock"))?;
     lock.lock().context("Failed to lock history")?;
     let mut entries = load(path)?;
     push(&mut entries, entry);
     let temp = parent.join(format!(".history-{}", std::process::id()));
     let result = (|| -> Result<()> {
-        let mut file = fs::OpenOptions::new()
+        let mut file = plavno_platform::private_options()
             .write(true)
             .create_new(true)
-            .mode(0o600)
             .open(&temp)?;
         serde_json::to_writer(&mut file, &entries)?;
         file.write_all(b"\n")?;
@@ -134,7 +128,7 @@ mod tests {
 
     #[test]
     fn history_survives_restart_preserves_sources_and_does_not_overwrite_corruption() {
-        let dir = env::temp_dir().join(format!("plavno-history-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plavno-history-{}", std::process::id()));
         let path = dir.join("history.json");
         assert!(load(&path).unwrap().is_empty());
         save_entry(&path, entry(1)).unwrap();

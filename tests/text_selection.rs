@@ -53,73 +53,11 @@ fn read_until(master: &mut File, output: &mut Vec<u8>, done: impl Fn(&[u8]) -> b
     }
 }
 
+#[path = "support/terminal.rs"]
+mod terminal;
+
 fn screen_text(bytes: &[u8]) -> String {
-    let mut cells = vec![vec![' '; 80]; 48];
-    let (mut x, mut y) = (0usize, 0usize);
-    let text = String::from_utf8_lossy(bytes);
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\x1b' => match chars.next() {
-                Some('[') => {
-                    let mut params = String::new();
-                    for end in chars.by_ref() {
-                        if ('@'..='~').contains(&end) {
-                            let values: Vec<usize> =
-                                params.split(';').map(|v| v.parse().unwrap_or(0)).collect();
-                            let first = values[0];
-                            match end {
-                                'H' | 'f' => {
-                                    y = first.max(1) - 1;
-                                    x = values.get(1).copied().unwrap_or(1).max(1) - 1;
-                                }
-                                'G' => x = first.max(1) - 1,
-                                'd' => y = first.max(1) - 1,
-                                'A' => y = y.saturating_sub(first.max(1)),
-                                'B' => y += first.max(1),
-                                'C' => x += first.max(1),
-                                'D' => x = x.saturating_sub(first.max(1)),
-                                'J' if first == 2 => cells.iter_mut().for_each(|row| row.fill(' ')),
-                                'K' if y < cells.len() => {
-                                    let range = match first {
-                                        1 => 0..(x + 1).min(80),
-                                        2 => 0..80,
-                                        _ => x.min(80)..80,
-                                    };
-                                    cells[y][range].fill(' ');
-                                }
-                                _ => {}
-                            }
-                            break;
-                        }
-                        params.push(end);
-                    }
-                }
-                Some(']' | 'P') => {
-                    while let Some(ch) = chars.next() {
-                        if ch == '\x07' || ch == '\x1b' && chars.next() == Some('\\') {
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            },
-            '\r' => x = 0,
-            '\n' => y += 1,
-            ch if !ch.is_control() => {
-                if y < cells.len() && x < cells[y].len() {
-                    cells[y][x] = ch;
-                }
-                x += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            }
-            _ => {}
-        }
-    }
-    cells
-        .into_iter()
-        .map(|row| row.into_iter().collect::<String>())
-        .collect::<Vec<_>>()
-        .join("\n")
+    terminal::screen_text(bytes, 80, 48)
 }
 
 fn has_wave(screen: &str) -> bool {

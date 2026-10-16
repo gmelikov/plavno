@@ -2,7 +2,6 @@ use super::{Backend, Feedback, Input, PlaybackMode, Service, Track, WaveStyle};
 use anyhow::{Context, Result, ensure};
 use std::{
     collections::{HashSet, VecDeque},
-    fs::File,
     io::Read,
 };
 
@@ -17,7 +16,7 @@ pub struct Multi {
     slots: Vec<Slot>,
     services: Vec<Service>,
     selected: &'static str,
-    random: File,
+    random: plavno_platform::Random,
 }
 
 impl Multi {
@@ -65,7 +64,7 @@ impl Multi {
                 .collect(),
             services,
             selected,
-            random: File::open("/dev/urandom")?,
+            random: plavno_platform::Random::new()?,
         })
     }
 

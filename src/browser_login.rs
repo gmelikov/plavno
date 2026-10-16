@@ -1,21 +1,34 @@
+#[cfg(unix)]
+use plavno_platform::process::Process as Child;
+#[cfg(unix)]
+use std::{
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::{
+            fs::{DirBuilderExt, PermissionsExt},
+            process::CommandExt,
+        },
+    },
+    process::{Command, Stdio},
+};
+#[cfg(windows)]
+#[path = "browser_windows.rs"]
+mod windows;
 use crate::{backend::web, config};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
     env, fs,
     io::{Read, Write},
-    os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
-        unix::{fs::PermissionsExt, process::CommandExt},
-    },
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
+#[cfg(windows)]
+use windows::{Child, Interrupts};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -66,10 +79,14 @@ struct TemporaryProfile(PathBuf);
 impl TemporaryProfile {
     fn new() -> Result<Self> {
         let mut random = [0; 16];
-        fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+        plavno_platform::Random::new()?.read_exact(&mut random)?;
         let suffix: String = random.iter().map(|b| format!("{b:02x}")).collect();
         let path = env::temp_dir().join(format!("plavno-browser-{suffix}"));
+        #[cfg(unix)]
         fs::DirBuilder::new().mode(0o700).create(&path)?;
+        #[cfg(windows)]
+        fs::create_dir(&path)?;
+        plavno_platform::private_directory(&path)?;
         Ok(Self(path))
     }
 }
@@ -80,8 +97,7 @@ impl Drop for TemporaryProfile {
     }
 }
 
-use std::os::unix::fs::DirBuilderExt;
-
+#[cfg(unix)]
 fn pipe() -> Result<(OwnedFd, OwnedFd)> {
     let mut fds = [-1; 2];
     #[cfg(target_os = "linux")]
@@ -100,11 +116,22 @@ fn pipe() -> Result<(OwnedFd, OwnedFd)> {
     Ok(pair)
 }
 
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    return fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+    #[cfg(windows)]
+    path.is_file()
+}
+
 fn browser_program() -> Result<PathBuf> {
     if let Some(program) = env::var_os("PLAVNO_BROWSER").filter(|p| !p.is_empty()) {
         return Ok(program.into());
     }
     for name in [
+        #[cfg(windows)]
+        "chrome.exe",
+        #[cfg(windows)]
+        "msedge.exe",
         "google-chrome-stable",
         "google-chrome",
         "chromium",
@@ -112,8 +139,7 @@ fn browser_program() -> Result<PathBuf> {
     ] {
         for directory in env::split_paths(&env::var_os("PATH").unwrap_or_default()) {
             let path = directory.join(name);
-            if fs::metadata(&path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            {
+            if is_executable(&path) {
                 return Ok(path);
             }
         }
@@ -132,8 +158,23 @@ fn browser_program() -> Result<PathBuf> {
             "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
         ] {
             let path = base.join(executable);
-            if fs::metadata(&path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            {
+            if is_executable(&path) {
+                return Ok(path);
+            }
+        }
+    }
+    #[cfg(windows)]
+    for base in ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"]
+        .into_iter()
+        .filter_map(env::var_os)
+    {
+        for relative in [
+            "Google/Chrome/Application/chrome.exe",
+            "Microsoft/Edge/Application/msedge.exe",
+            "Chromium/Application/chrome.exe",
+        ] {
+            let path = PathBuf::from(&base).join(relative);
+            if is_executable(&path) {
                 return Ok(path);
             }
         }
@@ -228,59 +269,63 @@ struct Browser {
 impl Browser {
     fn launch(program: &Path, headless: bool, cancelled: Arc<AtomicBool>) -> Result<Self> {
         let profile = TemporaryProfile::new()?;
-        let (read_input, write_input) = pipe()?;
-        let (read_output, write_output) = pipe()?;
-        let read_fd = read_input.as_raw_fd();
-        let write_fd = write_output.as_raw_fd();
-        let mut command = Command::new(program);
-        command
-            .args([
-                "--remote-debugging-pipe",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-sync",
-            ])
-            .arg(format!("--user-data-dir={}", profile.0.display()))
-            .arg("about:blank")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0);
-        if headless {
-            command.arg("--headless=new");
-        } else if env::var_os("DISPLAY").is_none() && env::var_os("WAYLAND_DISPLAY").is_some() {
-            command.arg("--ozone-platform=wayland");
-        }
-        unsafe {
-            command.pre_exec(move || {
-                let read_copy = libc::fcntl(read_fd, libc::F_DUPFD_CLOEXEC, 5);
-                if read_copy < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                let write_copy = libc::fcntl(write_fd, libc::F_DUPFD_CLOEXEC, 5);
-                if write_copy < 0 {
+        #[cfg(unix)]
+        let (child, input, output) = {
+            let (read_input, write_input) = pipe()?;
+            let (read_output, write_output) = pipe()?;
+            let read_fd = read_input.as_raw_fd();
+            let write_fd = write_output.as_raw_fd();
+            let mut command = Command::new(program);
+            command
+                .args([
+                    "--remote-debugging-pipe",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-sync",
+                ])
+                .arg(format!("--user-data-dir={}", profile.0.display()))
+                .arg("about:blank")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if headless {
+                command.arg("--headless=new");
+            } else if env::var_os("DISPLAY").is_none() && env::var_os("WAYLAND_DISPLAY").is_some() {
+                command.arg("--ozone-platform=wayland");
+            }
+            unsafe {
+                command.pre_exec(move || {
+                    let read_copy = libc::fcntl(read_fd, libc::F_DUPFD_CLOEXEC, 5);
+                    if read_copy < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    let write_copy = libc::fcntl(write_fd, libc::F_DUPFD_CLOEXEC, 5);
+                    if write_copy < 0 {
+                        libc::close(read_copy);
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    let result = if libc::dup2(read_copy, 3) < 0 || libc::dup2(write_copy, 4) < 0 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    };
                     libc::close(read_copy);
-                    return Err(std::io::Error::last_os_error());
-                }
-                let result = if libc::dup2(read_copy, 3) < 0 || libc::dup2(write_copy, 4) < 0 {
-                    Err(std::io::Error::last_os_error())
-                } else {
-                    Ok(())
-                };
-                libc::close(read_copy);
-                libc::close(write_copy);
-                result
-            });
-        }
-        let child = command
-            .spawn()
-            .context("Cannot start Chrome/Chromium; check PLAVNO_BROWSER")?;
-        drop(read_input);
-        drop(write_output);
+                    libc::close(write_copy);
+                    result
+                });
+            }
+            let child = Child::spawn(&mut command)
+                .context("Cannot start Chrome/Chromium; check PLAVNO_BROWSER")?;
+            drop(read_input);
+            drop(write_output);
+            (child, write_input.into(), read_output.into())
+        };
+        #[cfg(windows)]
+        let (child, input, output) = windows::launch(program, &profile.0, headless)?;
         Ok(Self {
             child,
-            input: write_input.into(),
-            output: read_output.into(),
+            input,
+            output,
             pending: Vec::new(),
             sequence: 0,
             captured: Captured::default(),
@@ -323,23 +368,14 @@ impl Browser {
                 self.child.try_wait()?.is_none(),
                 "Browser closed before login completed"
             );
-            let mut poll = libc::pollfd {
-                fd: self.output.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
             let wait = deadline
                 .saturating_duration_since(Instant::now())
-                .as_millis()
-                .min(100) as i32;
-            let ready = unsafe { libc::poll(&mut poll, 1, wait) };
-            if ready < 0 {
-                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                bail!("Browser connection failed");
-            }
-            if ready > 0 {
+                .min(Duration::from_millis(100));
+            let ready = match plavno_platform::wait_readable(&self.output, wait) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => result.context("Browser connection failed")?,
+            };
+            if ready {
                 let mut bytes = [0; 16384];
                 let size = self
                     .output
@@ -418,14 +454,14 @@ impl Drop for Browser {
         while self.child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        unsafe {
-            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
-        }
+        self.child.terminate();
         let _ = self.child.wait();
     }
 }
 
+#[cfg(unix)]
 struct Interrupts(Vec<(signal_hook::SigId, i32, libc::sigaction)>);
+#[cfg(unix)]
 impl Drop for Interrupts {
     fn drop(&mut self) {
         for (id, signal, previous) in self.0.drain(..) {
@@ -592,7 +628,11 @@ fn connect(source: Source, existing: &Value) -> Result<(Value, String)> {
         "Browser login needs a graphical session; run it from your desktop terminal"
     );
     let cancelled = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
     let mut interrupts = Interrupts(Vec::new());
+    #[cfg(windows)]
+    let _interrupts = Interrupts::new(cancelled.clone())?;
+    #[cfg(unix)]
     for signal in [
         signal_hook::consts::SIGINT,
         signal_hook::consts::SIGTERM,
@@ -716,7 +756,7 @@ pub fn login(source: &str) -> Result<()> {
         }
     }
     let mut random = [0; 8];
-    fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+    plavno_platform::Random::new()?.read_exact(&mut random)?;
     let suffix: String = random.iter().map(|b| format!("{b:02x}")).collect();
     let cookie_path = path.with_file_name(format!("{source}.cookies-{suffix}.txt"));
     config::save_private(&cookie_path, cookies.as_bytes())?;
@@ -745,6 +785,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)]
     fn browser_pipe_is_closed_on_exec_and_transports_bytes() {
         let (read, write) = pipe().unwrap();
         for fd in [&read, &write] {
@@ -910,6 +951,9 @@ mod tests {
         let pid = browser.child.id();
         drop(browser);
         assert!(!directory.exists());
+        #[cfg(unix)]
         assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+        #[cfg(windows)]
+        assert!(windows::process_exited(pid));
     }
 }

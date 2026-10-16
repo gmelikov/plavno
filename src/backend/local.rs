@@ -54,7 +54,7 @@ struct Scan {
 }
 
 impl Scan {
-    fn start(root: PathBuf, mut random: File) -> Result<Self> {
+    fn start(root: PathBuf, mut random: plavno_platform::Random) -> Result<Self> {
         let scan = Self {
             state: Arc::default(),
             cancel: Arc::default(),
@@ -113,7 +113,7 @@ pub struct LocalDirectory {
     remaining: Vec<usize>,
     invalid: HashSet<usize>,
     last: Option<usize>,
-    random: File,
+    random: plavno_platform::Random,
 }
 
 impl LocalDirectory {
@@ -125,7 +125,7 @@ impl LocalDirectory {
             remaining: Vec::new(),
             invalid: HashSet::new(),
             last: None,
-            random: File::open("/dev/urandom")?,
+            random: plavno_platform::Random::new()?,
         })
     }
 
@@ -273,10 +273,10 @@ fn track_path(track: &Track) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        os::unix::fs::symlink,
-        time::{Duration, SystemTime},
-    };
+    use std::time::{Duration, SystemTime};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     struct Library(PathBuf);
 
@@ -342,7 +342,7 @@ mod tests {
             assert_eq!(track.title, "Тестовый трек", "{extension}");
             assert_eq!(track.artist, "Исполнитель", "{extension}");
             assert_eq!(track.genre.as_deref(), Some("Instrumental"), "{extension}");
-            assert_eq!(track_path(&track).unwrap(), path);
+            assert_eq!(track_path(&track).unwrap().canonicalize().unwrap(), path);
             let cover = format!("{}{}", crate::local_metadata::COVER_PREFIX, track.id);
             assert_eq!(
                 track.cover_url.as_deref(),
@@ -403,7 +403,9 @@ mod tests {
             })
             .collect();
         fs::write(library.0.join("notes.txt"), b"not audio").unwrap();
+        #[cfg(unix)]
         symlink(&library.0, library.0.join("loop")).unwrap();
+        #[cfg(unix)]
         symlink(
             library.0.join("artist-0/album/track-0.FLAC"),
             library.0.join("duplicate.flac"),
@@ -466,12 +468,21 @@ mod tests {
             cancel: Arc::default(),
         });
         assert_eq!(
-            track_path(&backend.next_batch().unwrap()[0]).unwrap(),
+            track_path(&backend.next_batch().unwrap()[0])
+                .unwrap()
+                .canonicalize()
+                .unwrap(),
             first
         );
         assert!(!state.0.lock().unwrap().done);
         state.0.lock().unwrap().files.push(second.clone());
-        assert_eq!(track_path(&backend.more(&[]).unwrap()[0]).unwrap(), second);
+        assert_eq!(
+            track_path(&backend.more(&[]).unwrap()[0])
+                .unwrap()
+                .canonicalize()
+                .unwrap(),
+            second
+        );
     }
 
     #[test]
@@ -496,7 +507,7 @@ mod tests {
             let tracks = backend.next_batch().unwrap();
             assert_eq!(tracks.len(), 1);
             assert!(
-                matches!(backend.resolve(&tracks[0]).unwrap(), Input::File(path) if path == valid)
+                matches!(backend.resolve(&tracks[0]).unwrap(), Input::File(path) if path.canonicalize().unwrap() == valid)
             );
         }
         fs::remove_file(valid).unwrap();
@@ -509,7 +520,13 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         let library = Library::new();
         let path = library.track(std::ffi::OsString::from_vec(b"track-\xff.flac".to_vec()));
-        assert_eq!(track_path(&local_track(&path).unwrap()).unwrap(), path);
+        assert_eq!(
+            track_path(&local_track(&path).unwrap())
+                .unwrap()
+                .canonicalize()
+                .unwrap(),
+            path
+        );
     }
 
     #[test]
@@ -530,7 +547,9 @@ mod tests {
         let mut single = Local(path.clone());
         let tracks = single.start().unwrap();
         assert_eq!(tracks.len(), 1);
-        assert!(matches!(single.resolve(&tracks[0]).unwrap(), Input::File(file) if file == path));
+        assert!(
+            matches!(single.resolve(&tracks[0]).unwrap(), Input::File(file) if file.canonicalize().unwrap() == path)
+        );
         assert!(single.more(&[]).unwrap().is_empty());
     }
 }

@@ -3,7 +3,6 @@ use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    os::fd::AsRawFd,
     path::PathBuf,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
@@ -82,14 +81,11 @@ impl Bridge {
             serde_json::to_writer(&mut worker.stdin, &request)?;
             worker.stdin.write_all(b"\n")?;
             worker.stdin.flush()?;
-            let mut poll = libc::pollfd {
-                fd: worker.stdout.get_ref().as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let ready = unsafe { libc::poll(&mut poll, 1, 65_000) };
             ensure!(
-                ready > 0,
+                plavno_platform::wait_readable(
+                    worker.stdout.get_ref(),
+                    std::time::Duration::from_secs(65)
+                )?,
                 "The service adapter did not respond within 65 seconds"
             );
             let mut line = String::new();

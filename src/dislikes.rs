@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -100,13 +99,12 @@ impl Dislikes {
             let parent = path
                 .parent()
                 .context("The disliked tracks directory is not set")?;
-            fs::create_dir_all(parent)?;
-            let lock = fs::OpenOptions::new()
+            plavno_platform::private_directory(parent)?;
+            let lock = plavno_platform::private_options()
                 .create(true)
                 .truncate(false)
                 .read(true)
                 .write(true)
-                .mode(0o600)
                 .open(parent.join("dislikes.lock"))?;
             lock.lock().context("Cannot lock disliked tracks")?;
             Some(lock)
@@ -150,6 +148,7 @@ impl Dislikes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn track() -> Track {
@@ -186,6 +185,7 @@ mod tests {
                 .unwrap()
                 .contains("soundcloud", &track())
         );
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600

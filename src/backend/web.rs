@@ -3,7 +3,6 @@ use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -63,10 +62,9 @@ pub fn fixture_server_with_headers(
 }
 
 pub fn private(path: &Path) -> Result<String> {
-    let metadata = fs::symlink_metadata(path).context("Missing private connection file")?;
     ensure!(
-        metadata.file_type().is_file() && metadata.permissions().mode() & 0o077 == 0,
-        "Connection files must be regular files with permissions 0600"
+        plavno_platform::private_file(path).context("Missing private connection file")?,
+        "Connection files must be private regular files"
     );
     fs::read_to_string(path).context("Cannot read connection file")
 }

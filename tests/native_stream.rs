@@ -4,9 +4,8 @@ use std::{
     fs,
     io::{BufRead, BufReader, Cursor, Read, Write},
     net::{TcpListener, TcpStream},
-    os::unix::process::CommandExt,
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -159,13 +158,11 @@ fn serve(
     }
 }
 
-struct Process(Child);
+struct Process(plavno_platform::process::Process);
 impl Drop for Process {
     fn drop(&mut self) {
         if self.0.try_wait().ok().flatten().is_none() {
-            unsafe {
-                libc::kill(-(self.0.id() as i32), libc::SIGTERM);
-            }
+            self.0.terminate();
             let _ = self.0.wait();
         }
     }
@@ -240,15 +237,15 @@ fn check(hls: bool, encrypted: bool) {
     }
     let server = Server::new(files, hls);
     let mut process = Process(
-        Command::new(env!("CARGO_BIN_EXE_plavno"))
-            .arg("--stream-audio")
-            .current_dir(&runtime)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .spawn()
-            .unwrap(),
+        plavno_platform::process::Process::spawn(
+            Command::new(env!("CARGO_BIN_EXE_plavno"))
+                .arg("--stream-audio")
+                .current_dir(&runtime)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap(),
     );
     let request = serde_json::json!({"url":format!("{}/{}",server.url,if hls {"list.m3u8"} else {"audio.flac"})});
     writeln!(process.0.stdin.take().unwrap(), "{request}").unwrap();

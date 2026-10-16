@@ -1,6 +1,7 @@
 use crate::backend::{Input, network_error_at, yandex_http};
 use anyhow::{Context, Result};
 use ctr::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
+use plavno_platform::process::Process as Child;
 #[cfg(not(test))]
 use rodio::OutputStreamBuilder;
 use rodio::{Decoder, OutputStream, Sink, Source, mixer::Mixer};
@@ -8,8 +9,7 @@ use std::{
     collections::BTreeMap,
     fs::File,
     io::{self, BufReader, Read, Seek, SeekFrom, Write},
-    os::unix::process::CommandExt,
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -181,6 +181,8 @@ impl Audio {
         let mut stream =
             OutputStreamBuilder::open_default_stream().context(if cfg!(target_os = "macos") {
                 "Failed to open the CoreAudio default output; check macOS Sound settings"
+            } else if cfg!(windows) {
+                "Failed to open the WASAPI default output; check Windows Sound settings"
             } else {
                 "Failed to open the audio device; check ALSA/PipeWire/PulseAudio"
             })?;
@@ -523,9 +525,7 @@ impl CachedAudio {
             let mut child = stream.child.lock().unwrap();
             // Helpers and their converters share a private process group.
             if child.try_wait().is_ok_and(|status| status.is_none()) {
-                unsafe {
-                    libc::kill(-(child.id() as i32), libc::SIGTERM);
-                }
+                child.terminate();
             }
             stream.changed.notify_all();
         }
@@ -714,14 +714,14 @@ pub fn cache_input(input: Input) -> Result<Arc<CachedAudio>> {
         quality,
     } = input
     {
-        let mut child = Command::new(program)
-            .args(args)
-            .process_group(0)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("Failed to start the audio adapter")?;
+        let mut child = Child::spawn(
+            Command::new(program)
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .context("Failed to start the audio adapter")?;
         let mut stdin = child.stdin.take().unwrap();
         let mut stdout = child.stdout.take().unwrap();
         let send = (|| -> Result<()> {
@@ -1280,16 +1280,24 @@ mod tests {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/seek.flac");
         let gate = std::env::temp_dir().join(format!("plavno-pipe-gate-{}", std::process::id()));
         let _ = std::fs::remove_file(&gate);
+        #[cfg(unix)]
         let code = "read -r request; dd if=\"$1\" bs=131072 count=1 2>/dev/null; while [ ! -e \"$2\" ]; do sleep .01; done; dd if=\"$1\" bs=131072 skip=1 2>/dev/null";
-        let buffer = cache_input(Input::Pipe {
-            program: "sh".into(),
-            args: vec![
+        #[cfg(unix)]
+        let (program, args) = (
+            "sh",
+            vec![
                 "-c".into(),
                 code.into(),
                 "fixture".into(),
                 fixture.as_os_str().to_string_lossy().into_owned(),
                 gate.as_os_str().to_string_lossy().into_owned(),
             ],
+        );
+        #[cfg(windows)]
+        let (program, args) = ("powershell.exe", vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), r#"$request = [Console]::ReadLine() | ConvertFrom-Json; $file = [IO.File]::OpenRead($request.path); $output = [Console]::OpenStandardOutput(); $bytes = New-Object byte[] 131072; $size = $file.Read($bytes, 0, $bytes.Length); $output.Write($bytes, 0, $size); $output.Flush(); while (!(Test-Path -LiteralPath $request.gate)) { Start-Sleep -Milliseconds 10 }; $file.CopyTo($output); $file.Dispose()"#.into()]);
+        let buffer = cache_input(Input::Pipe {
+            program: program.into(),
+            args,
             request: serde_json::json!({"path":fixture,"gate":gate}),
             quality: "Synthetic FLAC stream".into(),
         })
@@ -1350,12 +1358,19 @@ mod tests {
         drop(reader);
         drop(buffer);
 
-        let buffer = cache_input(Input::Pipe {
-            program: "sh".into(),
-            args: vec![
+        #[cfg(unix)]
+        let (program, args) = (
+            "sh",
+            vec![
                 "-c".into(),
                 "read -r request; printf cached; exec sleep 30".into(),
             ],
+        );
+        #[cfg(windows)]
+        let (program, args) = ("powershell.exe", vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), "[void][Console]::ReadLine(); $output = [Console]::OpenStandardOutput(); $output.Write([Text.Encoding]::ASCII.GetBytes('cached'), 0, 6); $output.Flush(); Start-Sleep -Seconds 30".into()]);
+        let buffer = cache_input(Input::Pipe {
+            program: program.into(),
+            args,
             request: serde_json::json!({}),
             quality: "Cancellation fixture".into(),
         })

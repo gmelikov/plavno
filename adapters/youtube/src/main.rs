@@ -7,15 +7,13 @@ use serde_json::{Value, json};
 use std::{
     fs,
     io::{self, BufRead, Write},
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 fn private(path: &Path) -> Result<String> {
-    let meta = fs::symlink_metadata(path).context("Missing private connection file")?;
     ensure!(
-        meta.file_type().is_file() && meta.permissions().mode() & 0o077 == 0,
+        plavno_platform::private_file(path)?,
         "Connection files must be regular files with permissions 0600"
     );
     fs::read_to_string(path).context("Cannot read connection file")
@@ -90,7 +88,7 @@ impl Service {
             );
         }
         fs::create_dir_all(&storage)?;
-        fs::set_permissions(&storage, fs::Permissions::from_mode(0o700))?;
+        plavno_platform::private_directory(&storage)?;
         let cache = storage.join("rustypipe_cache.json");
         if fs::symlink_metadata(&cache).is_ok() {
             private(&cache)?;
@@ -239,6 +237,7 @@ fn rpc_response(result: Result<Value>) -> Value {
 }
 
 fn main() -> Result<()> {
+    #[cfg(unix)]
     unsafe {
         libc::umask(0o077);
     }

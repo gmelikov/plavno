@@ -439,7 +439,7 @@ impl Vk {
                 ensure!(offset < 100_000, "VK My Music pagination did not finish");
             }
             ensure!(!ids.is_empty(), "VK My Music is empty; add tracks first");
-            let mut random = std::io::BufReader::new(std::fs::File::open("/dev/urandom")?);
+            let mut random = std::io::BufReader::new(plavno_platform::Random::new()?);
             let queue = self.library.as_mut().unwrap();
             super::yandex::shuffle_favorites(&mut ids, queue.last.as_deref(), &mut random)?;
             queue.remaining = ids.into();
@@ -1240,7 +1240,9 @@ mod tests {
             br#"{"cookie":"session=original; remixuserid=123","site":"https://vk.ru"}"#,
         )
         .unwrap();
-        std::fs::File::open(&profile)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&profile)
             .unwrap()
             .set_times(
                 std::fs::FileTimes::new()

@@ -11,7 +11,6 @@ use std::{
     collections::HashSet,
     fs,
     io::{BufRead, Write},
-    os::unix::fs::PermissionsExt,
     path::Path,
     time::Duration,
 };
@@ -22,9 +21,8 @@ struct Spotify {
 }
 
 fn private(path: &Path) -> Result<()> {
-    let meta = fs::symlink_metadata(path)?;
     ensure!(
-        meta.file_type().is_file() && meta.permissions().mode() & 0o077 == 0,
+        plavno_platform::private_file(path)?,
         "Spotify credentials must be regular files with permissions 0600"
     );
     Ok(())
@@ -54,7 +52,7 @@ impl Spotify {
             );
         }
         fs::create_dir_all(&directory)?;
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+        plavno_platform::private_directory(&directory)?;
         let credentials_path = directory.join("credentials.json");
         if fs::symlink_metadata(&credentials_path).is_ok() {
             private(&credentials_path)?;
@@ -243,6 +241,7 @@ async fn handle(adapter: &mut Option<Spotify>, request: &Value) -> Result<Value>
 }
 
 fn main() {
+    #[cfg(unix)]
     unsafe {
         libc::umask(0o077);
     }

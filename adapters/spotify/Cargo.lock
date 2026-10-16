@@ -1387,6 +1387,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "plavno-platform"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "plavno-spotify"
 version = "0.1.0"
 dependencies = [
@@ -1395,6 +1404,7 @@ dependencies = [
  "librespot-core",
  "librespot-metadata",
  "librespot-protocol",
+ "plavno-platform",
  "protobuf",
  "serde_json",
  "tokio",

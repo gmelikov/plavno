@@ -8,7 +8,6 @@ use serde_json::{Value, json};
 use sha2::Sha256;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fs::File,
     io::{BufReader, Read},
     time::{Duration, Instant},
 };
@@ -358,8 +357,9 @@ impl Yandex {
         self.refresh_favorites(true)?;
         let mut ids: Vec<_> = self.favorites.as_ref().unwrap().0.iter().cloned().collect();
         ensure!(!ids.is_empty(), "No favorite tracks yet; like tracks first");
-        let mut random =
-            BufReader::new(File::open("/dev/urandom").context("Failed to open the random source")?);
+        let mut random = BufReader::new(
+            plavno_platform::Random::new().context("Failed to open the random source")?,
+        );
         let queue = self.shuffle.as_mut().unwrap();
         shuffle_favorites(&mut ids, queue.last.as_deref(), &mut random)?;
         queue.remaining = ids.into();

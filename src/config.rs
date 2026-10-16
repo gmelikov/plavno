@@ -1,10 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use std::{
-    env, fs,
-    io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
-};
+use std::{env, fs, io::Write, path::PathBuf};
 
 pub const JSON_PROVIDERS: [(&str, &str); 4] = [
     ("soundcloud", "SoundCloud"),
@@ -61,8 +56,7 @@ pub fn backends_with_directory(directory: Option<PathBuf>) -> Result<Registry> {
     }
     for (key, name) in JSON_PROVIDERS {
         let path = profile_path(key)?;
-        let ready = fs::symlink_metadata(&path)
-            .is_ok_and(|meta| meta.file_type().is_file() && meta.permissions().mode() & 0o077 == 0);
+        let ready = plavno_platform::private_file(&path).unwrap_or(false);
         services.push(Service {
             key,
             name,
@@ -150,10 +144,7 @@ pub fn save_local_directory(path: &std::path::Path) -> Result<PathBuf> {
 }
 
 pub fn yandex_with_token(token: String) -> crate::backend::Yandex {
-    let directory = env::var_os("XDG_CACHE_HOME")
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")));
+    let directory = plavno_platform::cache_home().ok();
     match directory {
         Some(directory) => {
             crate::backend::Yandex::with_cache(token, directory.join("plavno/yandex-streams"))
@@ -186,14 +177,12 @@ pub fn login_manual(source: &str) -> Result<()> {
 
 pub(crate) fn save_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("Missing configuration directory")?;
-    fs::create_dir_all(parent)?;
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    plavno_platform::private_directory(parent)?;
     let temp = parent.join(format!(".profile-{}", std::process::id()));
     let result = (|| -> Result<()> {
-        let mut file = fs::OpenOptions::new()
+        let mut file = plavno_platform::private_options()
             .write(true)
             .create_new(true)
-            .mode(0o600)
             .open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
@@ -207,10 +196,7 @@ pub(crate) fn save_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn token_path() -> Result<PathBuf> {
-    let base = match env::var_os("XDG_CONFIG_HOME").filter(|p| !p.is_empty()) {
-        Some(path) => PathBuf::from(path),
-        None => PathBuf::from(env::var_os("HOME").context("HOME is not set")?).join(".config"),
-    };
+    let base = plavno_platform::config_home()?;
     Ok(base.join("plavno/yandex.token"))
 }
 
@@ -220,10 +206,9 @@ pub fn load() -> Result<String> {
         return Ok(token.trim().into());
     }
     let path = token_path()?;
-    let meta = fs::symlink_metadata(&path).context("To sign in, run: plavno login yandex")?;
     ensure!(
-        meta.file_type().is_file() && meta.permissions().mode() & 0o077 == 0,
-        "The token file must have permissions 0600 and must not be a symlink"
+        plavno_platform::private_file(&path).context("To sign in, run: plavno login yandex")?,
+        "The token file must be private and must not be a symlink"
     );
     let token = fs::read_to_string(path)?;
     ensure!(
@@ -253,25 +238,7 @@ pub fn login() -> Result<()> {
     let token = rpassword::prompt_password("Yandex Music OAuth token (hidden input): ")?;
     ensure!(!token.trim().is_empty(), "The token is empty");
     let path = token_path()?;
-    let parent = path.parent().unwrap();
-    fs::create_dir_all(parent)?;
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-    let temp = parent.join(format!(".token-{}", std::process::id()));
-    let result = (|| -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)?;
-        file.write_all(token.trim().as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&temp, &path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temp);
-    }
-    result?;
+    save_private(&path, token.trim().as_bytes())?;
     println!("Token saved to {}", path.display());
     Ok(())
 }
