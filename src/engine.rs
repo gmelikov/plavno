@@ -1400,7 +1400,13 @@ impl Engine {
             && self.seeking.is_none()
             && self.audio.sink.empty()
         {
-            let read_error = playing.progress.error.lock().unwrap().clone();
+            let read_error = playing
+                .progress
+                .error
+                .lock()
+                .unwrap()
+                .clone()
+                .or_else(|| playing.buffer.failure().map(|failure| failure.to_string()));
             let incomplete = read_error.is_some()
                 || playing
                     .track

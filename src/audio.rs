@@ -573,6 +573,15 @@ pub struct CachedAudio {
 }
 
 impl CachedAudio {
+    pub fn failure(&self) -> Option<crate::stream::Failure> {
+        self.state.stream.as_ref().and_then(|stream| {
+            let progress = stream.progress.lock().unwrap();
+            progress
+                .failed
+                .then_some(progress.failure.unwrap_or(crate::stream::Failure::Failed))
+        })
+    }
+
     #[cfg(test)]
     pub fn buffered_bytes(&self) -> u64 {
         self.state
@@ -742,7 +751,7 @@ struct CacheReader {
 impl Read for CacheReader {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         let state = &self.audio.state;
-        if bytes.is_empty() || state.length().is_some_and(|len| self.position >= len) {
+        if bytes.is_empty() || state.stream.is_none() && self.position >= state.len {
             return Ok(0);
         }
         let (offset, chunk) = cache_chunk(state, self.position, bytes.len().min(HTTP_CHUNK), true)?;
@@ -1090,12 +1099,7 @@ fn prepare_segment(
         builder = builder.with_byte_len(len);
     }
     let mut decoder = builder.build().map_err(|error| {
-        let failure = cache.state.stream.as_ref().and_then(|stream| {
-            let progress = stream.progress.lock().unwrap();
-            progress
-                .failed
-                .then_some(progress.failure.unwrap_or(crate::stream::Failure::Failed))
-        });
+        let failure = cache.failure();
         let detail = failure
             .map(|failure| failure.to_string())
             .or_else(|| progress.error.lock().unwrap().clone())
@@ -1435,6 +1439,45 @@ mod tests {
             1,
             "Stopped decoder retained the audio buffer"
         );
+    }
+
+    #[test]
+    fn pipe_failure_is_preserved_after_cached_bytes_are_consumed() {
+        #[cfg(unix)]
+        let (program, args) = (
+            "sh",
+            vec![
+                "-c",
+                "read -r request; printf cached; printf 'PLAVNO_STREAM_ERROR={\"http\":403}\\n' >&2; exit 1",
+            ],
+        );
+        #[cfg(windows)]
+        let (program, args) = (
+            "powershell.exe",
+            vec![
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[void][Console]::ReadLine(); [Console]::OpenStandardOutput().Write([Text.Encoding]::ASCII.GetBytes('cached'), 0, 6); [Console]::Error.WriteLine('PLAVNO_STREAM_ERROR={\"http\":403}'); exit 1",
+            ],
+        );
+        let buffer = cache_input(Input::Pipe {
+            program: program.into(),
+            args: args.into_iter().map(str::to_owned).collect(),
+            request: serde_json::json!({}),
+            quality: "fixture".into(),
+        })
+        .unwrap();
+        wait_until(|| buffer.state.length().is_some());
+        let mut reader = CacheReader {
+            audio: buffer,
+            position: 0,
+        };
+        let mut cached = [0; 6];
+        reader.read_exact(&mut cached).unwrap();
+        assert_eq!(&cached, b"cached");
+        let error = reader.read(&mut [0; 1]).unwrap_err();
+        assert_eq!(error.to_string(), "Audio CDN returned HTTP 403");
     }
 
     #[test]
