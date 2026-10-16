@@ -59,7 +59,7 @@ See [multi-package behavior](https://axodotdev.github.io/cargo-dist/book/workspa
 ## Homebrew tap
 
 The public tap is [gmelikov/homebrew-plavno](https://github.com/gmelikov/homebrew-plavno).
-After the first stable release containing both macOS archives, users install with:
+Starting with v0.3.1, users install with:
 
 ```sh
 brew install gmelikov/plavno/plavno
@@ -68,8 +68,7 @@ brew install gmelikov/plavno/plavno
 The formula installs prebuilt Apple Silicon or Intel executables: the player and
 both helpers. Rust is not required. ffmpeg remains optional for HLS; browser-based
 sign-in needs Chrome/Chromium. The old v0.3.0 release contains only Linux binaries,
-so it cannot populate the tap. Until a new stable binary release, the tap contains
-its README and CI configuration, without a formula pointing to missing downloads.
+so it cannot populate the tap. v0.3.1 is the first release that publishes the formula.
 
 After publishing a stable GitHub Release, `release.yml` calls
 [homebrew.yml](../.github/workflows/homebrew.yml). It generates the formula from

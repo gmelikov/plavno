@@ -209,6 +209,8 @@ jobs:
           - Windows 10/11 x64: MSVC build with the C runtime linked statically.
 
           Extract the archive and put all three executables in a directory on PATH. Install ffmpeg for HLS playback; browser-based service sign-in needs Chrome/Chromium (or Edge on Windows). See README for setup and source builds.
+
+          macOS users can install the player and both helpers with `brew install gmelikov/plavno/plavno`. The tap is updated automatically after the release checks pass.
           EOF
             gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --title "plavno $RELEASE_TAG" --notes-file dist/release-notes.md --repo "$GITHUB_REPOSITORY"
           fi

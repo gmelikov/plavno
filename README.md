@@ -36,9 +36,8 @@ Homebrew on macOS uses the [gmelikov tap](https://github.com/gmelikov/homebrew-p
 brew install gmelikov/plavno/plavno
 ```
 
-The formula appears after the first stable release with macOS archives and includes
-both service helpers. Releases v0.3.0 and earlier have no macOS archives; until the
-first new release, build from source or use the CI archives instead.
+The formula installs prebuilt binaries and both service helpers. Homebrew and
+macOS/Windows release archives are available starting with v0.3.1.
 
 Download a prebuilt archive from [GitHub Releases](https://github.com/gmelikov/plavno/releases).
 Each archive includes `plavno`, `plavno-spotify`, and `plavno-youtube`, plus this
