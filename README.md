@@ -14,12 +14,8 @@ A lightweight TUI player for Linux, macOS and Windows with music streams from po
 
 ## Features
 
-- **MPRIS desktop integration (Linux)** — control playback with media keys, desktop media
-  widgets, or `playerctl`. Track information and album artwork appear in desktop controls.
-- **macOS media controls** — media keys and headphone buttons control playback;
-  Now Playing publishes track information, artwork, playback position and speed.
-- **Windows media controls** — media keys and system playback controls with track
-  information, embedded covers, position and speed.
+- **Media controls** — media keys and system playback controls on Linux, macOS and
+  Windows, with track information, album artwork, playback position and speed.
 - **Service waves and shuffle** — Yandex My Vibe, VK recommendations, library shuffle,
   and Wave Shuffle across connected services.
 - **Likes and dislikes** — like/unlike in Yandex or VK, exclude unwanted tracks, and undo dislikes.
@@ -30,31 +26,27 @@ A lightweight TUI player for Linux, macOS and Windows with music streams from po
 
 ## Quick start
 
-Homebrew on macOS uses the [gmelikov tap](https://github.com/gmelikov/homebrew-plavno):
+### macOS
+
+Install with [Homebrew](https://github.com/gmelikov/homebrew-plavno):
 
 ```sh
 brew install gmelikov/plavno/plavno
 ```
 
-The formula installs prebuilt binaries and both service helpers. Homebrew and
-macOS/Windows release archives are available starting with v0.3.1.
+This installs the player and both service helpers. Alternatively, download the
+`*-macos-aarch64.tar.gz` (Apple Silicon) or `*-macos-x86_64.tar.gz` (Intel) archive from
+[GitHub Releases](https://github.com/gmelikov/plavno/releases/latest) and put all
+three executables in a directory on PATH.
 
-Download a prebuilt archive from [GitHub Releases](https://github.com/gmelikov/plavno/releases).
-Each archive includes `plavno`, `plavno-spotify`, and `plavno-youtube`, plus this
-README and the license. Rust and a C/C++ toolchain are not required to run them.
+### Linux
 
-| Platform | Archive suffix | Runtime prerequisites |
-|---|---|---|
-| Linux x86_64 / ARM64 | `linux-x86_64-gnu.tar.gz` / `linux-aarch64-gnu.tar.gz` | glibc 2.35+, ALSA, D-Bus |
-| macOS Apple Silicon / Intel | `macos-aarch64.tar.gz` / `macos-x86_64.tar.gz` | Native builds checked on macOS 15 |
-| Windows 10/11 x64 | `windows-x86_64-msvc.zip` | C runtime is linked statically |
+Download the `*-linux-x86_64-gnu.tar.gz` or `*-linux-aarch64-gnu.tar.gz` archive from
+[GitHub Releases](https://github.com/gmelikov/plavno/releases/latest). Extract it
+and put `plavno`, `plavno-spotify`, and `plavno-youtube` in a directory on PATH,
+such as `~/.local/bin`.
 
-Extract the archive and put **all three executables** in a directory on PATH
-(`~/.local/bin` is a common choice on Linux). On Windows, add the extracted folder
-to your user PATH and open a new terminal. Then run `plavno sources`.
-
-Linux requires `libasound.so.2` and `libdbus-1.so.3`. Install the runtime packages
-for your distribution; development headers are only needed when building from source:
+Requires glibc 2.35+, ALSA and D-Bus. Install the runtime packages for your distribution:
 
 ```sh
 # Debian / Ubuntu (on newer Ubuntu releases, use libasound2t64 instead of libasound2)
@@ -69,59 +61,27 @@ Audio uses the ALSA default device; PipeWire/PulseAudio needs its ALSA plugin
 (for example `pipewire-alsa` or `pulseaudio-alsa` on Arch). A desktop D-Bus session
 enables media keys and Now Playing. Alpine/musl requires a separate source build.
 
+### Windows
+
+On Windows 10/11 x64, download the `*-windows-x86_64-msvc.zip` archive from
+[GitHub Releases](https://github.com/gmelikov/plavno/releases/latest). Extract it,
+keeping `plavno.exe`, `plavno-spotify.exe`, and `plavno-youtube.exe` together.
+Add the extracted folder to your user PATH and open a new Windows Terminal.
+
+### Connect and play
+
+```sh
+plavno sources
+```
+
+Connect a service using the [instructions below](#services), then start playback
+with `plavno --source SOURCE`. For local music, run `plavno local /path/to/music`,
+then `plavno --source local`.
+
 Install ffmpeg and make it available on PATH for HLS playback. Browser-based
 service sign-in needs Chrome/Chromium, or Edge on Windows. These external programs
-are not included in the archives. `PLAVNO_FFMPEG` and `PLAVNO_BROWSER` override their paths.
-
-Alternatively, install the player from crates.io with Rust:
-
-```sh
-cargo install plavno --locked
-plavno sources
-```
-
-Build dependencies: `libasound2-dev libdbus-1-dev` on Debian/Ubuntu, or
-`alsa-lib-devel dbus-devel` on Fedora.
-
-Cargo installation builds only the player; build the Spotify and YouTube helpers
-separately as described in the [service setup instructions](docs/services.md#spotify-and-youtube-music).
-
-To build on macOS, use the checkout below after installing Rust and Xcode Command
-Line Tools (`xcode-select --install`). Playback uses the CoreAudio default output;
-ALSA and D-Bus are not required. Install ffmpeg with `brew install ffmpeg` for HLS.
-Chrome/Chromium is detected in `/Applications`, `~/Applications`, or PATH.
-Desktop media controls use MPRIS on Linux and MediaPlayer on macOS. The macOS
-integration handles play/pause, stop, next/previous, position and playback speed;
-it runs without a Dock icon or a separate window. Sixel rendering needs a terminal with sixel support;
-the default braille renderer works without it.
-
-To build on Windows 10/11, install Rust with the MSVC toolchain and Visual Studio Build
-Tools (Desktop development with C++). Build with `cargo build --release` and run
-`.\target\release\plavno.exe` in Windows Terminal. Playback uses the WASAPI
-default output. System Media Transport Controls handle play/pause, stop,
-next/previous, position and speed, and publish the track title, artist and cover.
-Install ffmpeg and add it to PATH for HLS playback. Chrome and Edge are detected
-in their standard installation directories or PATH; `PLAVNO_BROWSER` overrides
-the executable. Settings and tokens use `%APPDATA%\plavno`, history and caches
-use `%LOCALAPPDATA%\plavno`. Private directories use a protected user ACL.
-The `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` overrides also work.
-
-To build from source:
-
-```sh
-cargo build --release
-export PATH="$PWD/target/release:$PATH"
-plavno sources
-```
-
-Connect a service below, then start it with `plavno --source SOURCE`.
-For development, use `cargo run` or `cargo check` and keep the build cache.
-CI checks the player and both helpers on Linux and macOS 15 (Apple Silicon and
-Intel), and Windows Server 2025. Windows tests exercise native SMTC, ConPTY,
-private ACLs, the Chrome pipe protocol and streamed audio. `cargo test --locked --features test-audio` also runs the PTY UI tests on
-macOS without a physical output device. Unit tests use a software audio sink;
-the `test-audio` feature enables that sink in the test executable only when
-`PLAVNO_TEST_AUDIO=1` is set. Normal builds use the platform's audio device.
+are not included in the archives. On macOS, use `brew install ffmpeg`.
+`PLAVNO_FFMPEG` and `PLAVNO_BROWSER` override their paths.
 
 ## Services
 
@@ -153,17 +113,17 @@ seed track when prompted. Start with `plavno --source soundcloud`.
 
 ### Spotify
 
-[Build the Spotify helper](docs/services.md#spotify-and-youtube-music), then run
-`plavno login spotify` and paste a JSON profile with a seed track URI, OAuth token
+Run `plavno login spotify` and paste a JSON profile with a seed track URI, OAuth token
 with `streaming` scope, and client ID. Premium is required. Start with `plavno --source spotify`.
 
 ### YouTube Music
 
-[Build the YouTube helper](docs/services.md#spotify-and-youtube-music), then run
-`plavno login ytmusic` and paste `{"cookies":"/absolute/path/youtube-cookies.txt"}`
+Run `plavno login ytmusic` and paste `{"cookies":"/absolute/path/youtube-cookies.txt"}`
 using a Netscape cookie export, or `{"seed":"VIDEO_ID_OR_URL"}` for public radio.
 Start with `plavno --source ytmusic`.
 
+Homebrew and release archives include both helpers. Cargo installations need
+[separate helper builds](docs/services.md#spotify-and-youtube-music).
 See [service setup](docs/services.md) for profile examples and troubleshooting.
 
 ## Run
@@ -227,6 +187,7 @@ Sixel uses a detailed violet-jacket skin; `--dance-skin silhouette` selects the
 previous look. See [dance rendering](docs/dance.md) for the original pose sheet.
 Sixel defaults to `--sixel-update diff`, restoring and redrawing only the changed
 region. Use `--sixel-update full` to clear and repaint each frame instead.
+Sixel requires a compatible terminal; the default braille renderer works without it.
 
 Hover over the album artwork: the left third plays the previous track, the center
 toggles playback, and the right third plays the next track. Click the progress bar
@@ -261,13 +222,38 @@ Previous, current, and next audio files stay in RAM for seeking and replay;
 RAM use depends on track size. Service audio is not saved to disk.
 
 Configuration lives in `~/.config/plavno`; history and permanent dislikes live in
-`~/.local/state/plavno`. `XDG_CONFIG_HOME` and `XDG_STATE_HOME` override these roots.
+`~/.local/state/plavno`. On Windows, settings and tokens use `%APPDATA%\plavno`,
+while history and caches use `%LOCALAPPDATA%\plavno`; private directories use a
+protected user ACL. `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME`
+override the corresponding roots on all platforms.
 History stores metadata for the last 2000 plays. Yandex and VK also receive account
 dislikes; `u` undoes them. Volume starts at 100%, speed at 1x. Changing speed also
 changes pitch.
 
-Media keys and `playerctl` work through session D-Bus, for example:
+On Linux, media keys and `playerctl` work through session D-Bus, for example:
 `playerctl -p plavno play-pause` or `playerctl -p plavno position 5+`.
+
+## Build from source
+
+Install Rust and the build dependencies for your OS:
+
+- **Linux:** `libasound2-dev libdbus-1-dev` on Debian/Ubuntu, or
+  `alsa-lib-devel dbus-devel` on Fedora.
+- **macOS:** Xcode Command Line Tools (`xcode-select --install`).
+- **Windows:** the Rust MSVC toolchain and Visual Studio Build Tools with
+  Desktop development with C++.
+
+Install the player from crates.io:
+
+```sh
+cargo install plavno --locked
+```
+
+Or run `cargo build --release` from a checkout. The executable is
+`target/release/plavno` (`target\release\plavno.exe` on Windows).
+Build the Spotify and YouTube helpers separately using the
+[service setup instructions](docs/services.md#spotify-and-youtube-music).
+For development, use `cargo run` or `cargo check` and keep the build cache.
 
 ## Checks
 
@@ -276,6 +262,14 @@ cargo fmt --check
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
+
+CI checks the player and both helpers on Linux, macOS 15 (Apple Silicon and
+Intel), and Windows Server 2025. Windows tests exercise native SMTC, ConPTY,
+private ACLs, the Chrome pipe protocol and streamed audio.
+`cargo test --locked --features test-audio` also runs the PTY UI tests on macOS
+without a physical output device. Unit tests use a software audio sink; the
+`test-audio` feature enables that sink in the test executable only when
+`PLAVNO_TEST_AUDIO=1` is set. Normal builds use the platform's audio device.
 
 Release steps: [Publishing to crates.io](docs/publishing.md).
 
