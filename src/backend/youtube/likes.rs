@@ -10,6 +10,15 @@ fn configured(profile: &std::path::Path) -> bool {
         .is_some_and(|p| p["cookies"].is_string() || p["headers"].is_string())
 }
 
+fn client_context() -> Value {
+    let date = time::OffsetDateTime::now_utc();
+    json!({"client":{
+        "clientName":"WEB_REMIX",
+        "clientVersion":format!("1.{:04}{:02}{:02}.01.00",date.year(),u8::from(date.month()),date.day()),
+        "hl":"en"
+    },"user":{}})
+}
+
 fn authorization(cookies: &str, now: u64) -> Result<String> {
     let cookie = |name: &str| {
         cookies.split(';').find_map(|part| {
@@ -19,7 +28,7 @@ fn authorization(cookies: &str, now: u64) -> Result<String> {
     };
     let sid = cookie("SAPISID")
         .or_else(|| cookie("__Secure-3PAPISID"))
-        .context("YouTube likes require signed-in cookies; refresh the cookie export")?;
+        .context("YouTube account access requires signed-in cookies; refresh the cookie export")?;
     Ok(format!(
         "SAPISIDHASH {now}_{:x}",
         Sha1::digest(format!("{now} {sid} {ORIGIN}"))
@@ -102,6 +111,29 @@ fn find<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
             .get(key)
             .or_else(|| object.values().find_map(|v| find(v, key))),
         Value::Array(items) => items.iter().find_map(|v| find(v, key)),
+        _ => None,
+    }
+}
+
+fn music_anchor(value: &Value, radio: bool) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            if let Some(endpoint) = object.get("watchEndpoint")
+                && let Some(id) = endpoint["videoId"].as_str().filter(|id| valid_id(id))
+                && matches!(
+                    find(endpoint, "musicVideoType").and_then(Value::as_str),
+                    Some("MUSIC_VIDEO_TYPE_ATV" | "MUSIC_VIDEO_TYPE_OMV" | "MUSIC_VIDEO_TYPE_UGC")
+                )
+                && (!radio
+                    || endpoint["playlistId"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("RD")))
+            {
+                return Some(id.to_owned());
+            }
+            object.values().find_map(|v| music_anchor(v, radio))
+        }
+        Value::Array(items) => items.iter().find_map(|v| music_anchor(v, radio)),
         _ => None,
     }
 }
@@ -201,18 +233,16 @@ impl YouTube {
 
     fn api(&mut self, endpoint: &str, mut body: Value) -> Result<Value> {
         self.check_cooldown()?;
-        let path = self
-            .session()?
-            .cookies
-            .as_ref()
-            .context("YouTube likes require saved cookies; use plavno login ytmusic")?;
+        let path =
+            self.session()?.cookies.as_ref().context(
+                "YouTube account access requires saved cookies; use plavno login ytmusic",
+            )?;
         let cookie =
             web::Cookies::read(path)?.header(&format!("{ORIGIN}/youtubei/v1/{endpoint}"))?;
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let auth = authorization(&cookie, now)?;
         let auth_user = self.session()?.auth_user.clone();
-        let date = time::OffsetDateTime::now_utc();
-        body["context"] = json!({"client":{"clientName":"WEB_REMIX", "clientVersion":format!("1.{:04}{:02}{:02}.01.00",date.year(),u8::from(date.month()),date.day()),"hl":"en"},"user":{}});
+        body["context"] = client_context();
         let base = format!("{ORIGIN}/youtubei/v1/");
         #[cfg(test)]
         let base = self.api_base.clone().unwrap_or(base);
@@ -229,7 +259,7 @@ impl YouTube {
             .header("X-Youtube-Client-Name", "67")
             .header("User-Agent", web::USER_AGENT)
             .send_json(body)
-            .map_err(|_| anyhow::anyhow!("YouTube likes request failed; check your network"))?;
+            .map_err(|_| anyhow::anyhow!("YouTube request failed; check your network"))?;
         let status = response.status().as_u16();
         if status == 429 {
             let wait = response
@@ -251,21 +281,21 @@ impl YouTube {
         }
         ensure!(
             !matches!(status, 401 | 403),
-            "YouTube likes require sign-in; refresh saved cookies"
+            "YouTube requires sign-in; refresh saved cookies"
         );
         ensure!(
             (200..300).contains(&status),
-            "YouTube likes returned HTTP {status}"
+            "YouTube returned HTTP {status}"
         );
         let value: Value = response
             .body_mut()
             .with_config()
             .limit(8 * 1024 * 1024)
             .read_json()
-            .map_err(|_| anyhow::anyhow!("Invalid YouTube likes response"))?;
+            .map_err(|_| anyhow::anyhow!("Invalid YouTube account response"))?;
         ensure!(
             value.is_object() && value.get("error").is_none(),
-            "YouTube rejected the likes request; refresh saved cookies"
+            "YouTube rejected the account request; refresh saved cookies"
         );
         let logged_out = value
             .pointer("/responseContext/serviceTrackingParams")
@@ -279,9 +309,23 @@ impl YouTube {
             });
         ensure!(
             !logged_out && find(&value, "loggedOut").and_then(Value::as_bool) != Some(true),
-            "YouTube likes require sign-in; refresh saved cookies"
+            "YouTube requires sign-in; refresh saved cookies"
         );
         Ok(value)
+    }
+
+    pub(super) fn personal_seed(&mut self) -> Result<String> {
+        let home = self.api("browse", json!({"browseId":"FEmusic_home"}))?;
+        if let Some(id) = music_anchor(&home, true).or_else(|| music_anchor(&home, false)) {
+            return Ok(id);
+        }
+        // A music account can have likes even when its home recommendations are empty.
+        let liked = self.api("browse", json!({"browseId":"VLLM"}))?;
+        find(&liked,"musicPlaylistShelfRenderer")
+            .and_then(|shelf| shelf["contents"].as_array())
+            .and_then(|items| items.iter().find_map(music_track))
+            .map(|track| track.id)
+            .context("No music recommendations or liked songs found; open music.youtube.com to set up your music recommendations, or use --seed")
     }
 
     fn remember_rating(&mut self, id: &str, liked: bool) {
@@ -494,6 +538,171 @@ mod tests {
             "fixedColumns":[{"musicResponsiveListItemFixedColumnRenderer":{"text":{"runs":[{"text":"3:12"}]}}}],
             "thumbnail":{"thumbnails":[{"url":"https://example.invalid/cover.jpg"}]}
         }})
+    }
+
+    #[test]
+    fn personal_mix_uses_music_home_and_reuses_its_anchor() {
+        let fixture = Fixture::new();
+        let mut youtube = account(&fixture);
+        youtube.seed = None;
+        let mut mix = song("9EcDe6qS0Xc");
+        mix["musicResponsiveListItemRenderer"]["overlay"]["watchEndpoint"]["playlistId"] =
+            json!("RDAMVM9EcDe6qS0Xc");
+        let (base, worker) = server(vec![(200, json!({"contents":[song("abcdefghijk"),mix]}))]);
+        youtube.api_base = Some(base);
+        fixture.reply(
+            1,
+            json!({"entries":[{"id":"9EcDe6qS0Xc"},{"id":"5LGUgChapj4"}]}),
+        );
+        fixture.reply(
+            2,
+            json!({"entries":[{"id":"5LGUgChapj4"},{"id":"abcdefghijk"}]}),
+        );
+        assert_eq!(youtube.start().unwrap()[0].id, "5LGUgChapj4");
+        assert_eq!(
+            youtube.more(&["5LGUgChapj4".into()]).unwrap()[0].id,
+            "abcdefghijk"
+        );
+        let calls = fixture.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0].last().unwrap(),
+            "https://www.youtube.com/watch?v=9EcDe6qS0Xc&list=RDMM"
+        );
+        assert_eq!(
+            calls[1].last().unwrap(),
+            "https://www.youtube.com/watch?v=5LGUgChapj4&list=RDMM"
+        );
+        let requests = worker.join().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "Only the initial batch needs a home request"
+        );
+        let body: Value =
+            serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["browseId"], "FEmusic_home");
+        assert!(
+            web::profile(&fixture.0.join("ytmusic.json"))
+                .unwrap()
+                .get("seed")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn empty_music_home_uses_one_page_of_liked_music_without_resolving_audio() {
+        let fixture = Fixture::new();
+        let mut youtube = account(&fixture);
+        youtube.seed = None;
+        let mut podcast = song("podcast0000");
+        podcast["musicResponsiveListItemRenderer"]["overlay"]["watchEndpoint"]["watchEndpointMusicSupportedConfigs"]
+            ["watchEndpointMusicConfig"]["musicVideoType"] =
+            json!("MUSIC_VIDEO_TYPE_PODCAST_EPISODE");
+        let (base, worker) = server(vec![
+            (
+                200,
+                json!({"contents":[podcast,{"watchEndpoint":{"videoId":"abcdefghijk"}}]}),
+            ),
+            (
+                200,
+                json!({"musicPlaylistShelfRenderer":{"contents":[song("9EcDe6qS0Xc")],"continuations":[{"nextContinuationData":{"continuation":"unused-page"}}]}}),
+            ),
+        ]);
+        youtube.api_base = Some(base);
+        fixture.reply(1, json!({"entries":[{"id":"5LGUgChapj4"}]}));
+        assert_eq!(youtube.start().unwrap()[0].id, "5LGUgChapj4");
+        let calls = fixture.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].last().unwrap().contains("v=9EcDe6qS0Xc&list=RDMM"));
+        let requests = worker.join().unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "Finding one anchor must not load the entire library"
+        );
+        let bodies: Vec<Value> = requests
+            .iter()
+            .map(|request| serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap())
+            .collect();
+        assert_eq!(bodies[0]["browseId"], "FEmusic_home");
+        assert_eq!(bodies[1]["browseId"], "VLLM");
+    }
+
+    #[test]
+    fn empty_music_account_has_an_actionable_error_without_opening_an_unanchored_mix() {
+        let fixture = Fixture::new();
+        let mut youtube = account(&fixture);
+        youtube.seed = None;
+        let (base, worker) = server(vec![
+            (200, json!({"contents":[]})),
+            (200, json!({"musicPlaylistShelfRenderer":{"contents":[]}})),
+        ]);
+        youtube.api_base = Some(base);
+        let error = youtube.start().unwrap_err().to_string();
+        assert!(error.contains("music.youtube.com") && error.contains("--seed"));
+        assert!(!error.contains("refresh YouTube cookies"));
+        assert!(fixture.calls().is_empty());
+        assert_eq!(worker.join().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn signed_out_music_home_stops_before_trying_a_library_or_radio() {
+        let fixture = Fixture::new();
+        let mut youtube = account(&fixture);
+        youtube.seed = None;
+        let (base, worker) = server(vec![(
+            200,
+            json!({"responseContext":{"serviceTrackingParams":[{"params":[{"key":"logged_in","value":"0"}]}]},"contents":[]}),
+        )]);
+        youtube.api_base = Some(base);
+        let error = youtube.start().unwrap_err().to_string();
+        assert!(error.contains("sign-in") && error.contains("cookies"));
+        assert!(fixture.calls().is_empty());
+        assert_eq!(worker.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    #[ignore = "Read-only public YouTube Music response contract; no saved account or cookies"]
+    fn live_public_music_home_and_player_overlay_shapes() {
+        let youtube = YouTube::new(PathBuf::from("unused-public-probe"));
+        for (endpoint, mut body) in [
+            ("browse", json!({"browseId":"FEmusic_home"})),
+            (
+                "next",
+                json!({"videoId":"5LGUgChapj4","playlistId":"RDAMVM5LGUgChapj4","isAudioOnly":true,"enablePersistentPlaylistPanel":true}),
+            ),
+        ] {
+            body["context"] = client_context();
+            let mut response = youtube
+                .api
+                .post(format!("{ORIGIN}/youtubei/v1/{endpoint}?prettyPrint=false"))
+                .header("Origin", ORIGIN)
+                .header("User-Agent", web::USER_AGENT)
+                .send_json(body)
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+            let value: Value = response
+                .body_mut()
+                .with_config()
+                .limit(8 * 1024 * 1024)
+                .read_json()
+                .unwrap();
+            if endpoint == "browse" {
+                assert!(
+                    music_anchor(&value, true)
+                        .or_else(|| music_anchor(&value, false))
+                        .is_some(),
+                    "Public Music home has no playable music anchor"
+                );
+            } else {
+                assert_eq!(
+                    selected_rating(&value, "5LGUgChapj4"),
+                    Some(false),
+                    "Public player like state was not recognized"
+                );
+            }
+        }
     }
 
     #[test]

@@ -125,10 +125,14 @@ credentials and Premium. Select one of these sources explicitly; `--seed`
 cannot be combined with `--source mixed`, `--favorites`, or `--file`.
 Rebuild the Spotify helper when updating a source installation.
 
-With cookies alone, plavno reads up to 20 home recommendations to choose a
-starting video, preferring a mix card, then opens the personal `RDMM` mix with
-that video ID. The starting video stays in RAM; the profile is not changed.
-If the home feed is empty, refresh cookies or provide a seed or playlist.
+With cookies alone, plavno reads YouTube Music home recommendations to choose a
+starting song, preferring a music radio endpoint, then opens the personal `RDMM`
+mix with that video ID. If Music home has no song, it reads one metadata page of
+Liked Music to find an anchor. The starting song stays in RAM; the profile is not
+changed, and later radio batches reuse the anchor without another home request.
+An empty music account needs recommendations or liked songs on music.youtube.com,
+or an explicit seed or playlist. A rejected session is reported as a sign-in
+error rather than an empty recommendation feed.
 
 yt-dlp fetches bounded flat playlist batches and resolves audio URLs only for
 tracks selected for playback or adjacent preloading. It does not download audio.
