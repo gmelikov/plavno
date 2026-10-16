@@ -86,8 +86,11 @@ Token or Netscape `cookies` may be needed for account access.
 
 ## Spotify and YouTube Music
 
-Release archives include both helpers. Put all three executables on PATH; no
-helper build is needed when using those archives.
+Release archives include both helpers. Keep them next to the player; no helper
+build is needed when using those archives. Run `./plavno` (`.\plavno.exe` on
+Windows), or put all three executables on PATH. `PLAVNO_SPOTIFY_HELPER` and
+`PLAVNO_YOUTUBE_HELPER` override discovery; otherwise the player searches its own
+directory first, then PATH.
 
 For a source checkout or a Cargo installation, build only the helper you need.
 These dependencies do not affect normal player edits.

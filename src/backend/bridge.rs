@@ -2,10 +2,24 @@ use super::{Backend, Feedback, Input, Track};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
+    ffi::OsString,
     io::{BufRead, BufReader, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
+
+fn helper_program(name: &str, explicit: Option<OsString>, player: Option<&Path>) -> PathBuf {
+    if let Some(path) = explicit {
+        return path.into();
+    }
+    if let Some(directory) = player.and_then(Path::parent) {
+        let adjacent = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        if adjacent.is_file() {
+            return adjacent;
+        }
+    }
+    name.into()
+}
 
 struct Worker {
     child: Child,
@@ -44,21 +58,19 @@ impl Bridge {
     }
 
     fn command(&self) -> (PathBuf, Vec<String>) {
-        if self.key == "spotify" {
-            (
-                std::env::var_os("PLAVNO_SPOTIFY_HELPER")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("plavno-spotify")),
-                vec![],
-            )
+        let (name, variable) = if self.key == "spotify" {
+            ("plavno-spotify", "PLAVNO_SPOTIFY_HELPER")
         } else {
-            (
-                std::env::var_os("PLAVNO_YOUTUBE_HELPER")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("plavno-youtube")),
-                vec![],
-            )
-        }
+            ("plavno-youtube", "PLAVNO_YOUTUBE_HELPER")
+        };
+        (
+            helper_program(
+                name,
+                std::env::var_os(variable),
+                std::env::current_exe().ok().as_deref(),
+            ),
+            vec![],
+        )
     }
 
     fn call(&mut self, method: &str, track: Option<&Track>, history: &[String]) -> Result<Value> {
@@ -70,10 +82,10 @@ impl Bridge {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()
-                .with_context(|| {
-                    format!(
-                        "{} adapter is unavailable; see README setup instructions",
-                        self.name
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Cannot start {} adapter: {error}; put the helper next to plavno or on PATH",
+                        self.name,
                     )
                 })?;
             self.worker = Some(Worker {
@@ -193,5 +205,40 @@ impl Backend for Bridge {
     }
     fn feedback(&mut self, _: &Track, _: Feedback, _: f64) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helpers_are_found_beside_the_player_with_explicit_overrides_and_path_fallback() {
+        let directory = std::env::temp_dir().join(format!(
+            "plavno-adjacent-helpers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let player = directory.join(format!("plavno{}", std::env::consts::EXE_SUFFIX));
+        for name in ["plavno-youtube", "plavno-spotify"] {
+            assert_eq!(
+                helper_program(name, None, Some(&player)),
+                PathBuf::from(name)
+            );
+            let helper = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+            std::fs::write(&helper, b"fixture").unwrap();
+            assert_eq!(helper_program(name, None, Some(&player)), helper);
+            let explicit = directory.join("explicit-helper");
+            assert_eq!(
+                helper_program(name, Some(explicit.clone().into_os_string()), Some(&player)),
+                explicit
+            );
+            assert_eq!(helper_program(name, None, None), PathBuf::from(name));
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -37,14 +37,14 @@ brew install gmelikov/plavno/plavno
 This installs the player and both service helpers. Alternatively, download the
 `*-macos-aarch64.tar.gz` (Apple Silicon) or `*-macos-x86_64.tar.gz` (Intel) archive from
 [GitHub Releases](https://github.com/gmelikov/plavno/releases/latest) and put all
-three executables in a directory on PATH.
+three executables together. Run `./plavno`, or add the directory to PATH.
 
 ### Linux
 
 Download the `*-linux-x86_64-gnu.tar.gz` or `*-linux-aarch64-gnu.tar.gz` archive from
 [GitHub Releases](https://github.com/gmelikov/plavno/releases/latest). Extract it
-and put `plavno`, `plavno-spotify`, and `plavno-youtube` in a directory on PATH,
-such as `~/.local/bin`.
+and keep `plavno`, `plavno-spotify`, and `plavno-youtube` together. Run `./plavno`,
+or put all three in a directory on PATH, such as `~/.local/bin`.
 
 Requires glibc 2.35+, ALSA and D-Bus. Install the runtime packages for your distribution:
 
