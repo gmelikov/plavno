@@ -2,7 +2,7 @@
 
 # plavno
 
-A lightweight TUI player for Linux and macOS with music streams from popular services, library shuffle, and mouse controls.
+A lightweight TUI player for Linux, macOS and Windows with music streams from popular services, library shuffle, and mouse controls.
 
 <img src="intro.png" alt="plavno terminal player with album artwork and an audio-reactive wave" width="885">
 
@@ -18,6 +18,8 @@ A lightweight TUI player for Linux and macOS with music streams from popular ser
   widgets, or `playerctl`. Track information and album artwork appear in desktop controls.
 - **macOS media controls** — media keys and headphone buttons control playback;
   Now Playing publishes track information, artwork, playback position and speed.
+- **Windows media controls** — media keys and system playback controls with track
+  information, embedded covers, position and speed.
 - **Service waves and shuffle** — Yandex My Vibe, VK recommendations, library shuffle,
   and Wave Shuffle across connected services.
 - **Likes and dislikes** — like/unlike in Yandex or VK, exclude unwanted tracks, and undo dislikes.
@@ -55,6 +57,17 @@ integration handles play/pause, stop, next/previous, position and playback speed
 it runs without a Dock icon or a separate window. Sixel rendering needs a terminal with sixel support;
 the default braille renderer works without it.
 
+On Windows 10/11, install Rust with the MSVC toolchain and Visual Studio Build
+Tools (Desktop development with C++). Build with `cargo build --release` and run
+`.\target\release\plavno.exe` in Windows Terminal. Playback uses the WASAPI
+default output. System Media Transport Controls handle play/pause, stop,
+next/previous, position and speed, and publish the track title, artist and cover.
+Install ffmpeg and add it to PATH for HLS playback. Chrome and Edge are detected
+in their standard installation directories or PATH; `PLAVNO_BROWSER` overrides
+the executable. Settings and tokens use `%APPDATA%\plavno`, history and caches
+use `%LOCALAPPDATA%\plavno`. Private directories use a protected user ACL.
+The `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` overrides also work.
+
 To build from source:
 
 ```sh
@@ -66,7 +79,8 @@ plavno sources
 Connect a service below, then start it with `plavno --source SOURCE`.
 For development, use `cargo run` or `cargo check` and keep the build cache.
 CI checks the player and both helpers on Linux and macOS 15 (Apple Silicon and
-Intel). `cargo test --locked --features test-audio` also runs the PTY UI tests on
+Intel), and Windows Server 2025. Windows tests exercise native SMTC, ConPTY,
+private ACLs, the Chrome pipe protocol and streamed audio. `cargo test --locked --features test-audio` also runs the PTY UI tests on
 macOS without a physical output device. Unit tests use a software audio sink;
 the `test-audio` feature enables that sink in the test executable only when
 `PLAVNO_TEST_AUDIO=1` is set. Normal builds use the platform's audio device.

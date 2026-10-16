@@ -26,11 +26,14 @@ jobs:
   check:
     name: ${{ matrix.package }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, macos-15-intel]
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2025]
         package: [plavno, plavno-spotify, plavno-youtube]
         include:
           - package: plavno
@@ -61,12 +64,17 @@ jobs:
         if: matrix.package == 'plavno' && runner.os == 'macOS'
         run: brew install ffmpeg
 
+      - name: Install Windows test dependencies
+        if: matrix.package == 'plavno' && runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress -y
+
       - name: Set up Rust
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup default stable
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
         with:
           path: |
             ~/.cargo/registry/index
@@ -85,6 +93,16 @@ jobs:
         if: matrix.package == 'plavno' && runner.os == 'macOS'
         run: cargo test --locked --target-dir target/plavno --features test-audio --test macos_media -- --ignored
 
+      - name: Windows media controls
+        if: matrix.package == 'plavno' && runner.os == 'Windows'
+        run: cargo test --locked --target-dir target/plavno --features test-audio --test windows_media -- --ignored
+
+      - name: Check shared platform crate
+        if: matrix.package == 'plavno'
+        run: |
+          cargo fmt --manifest-path crates/plavno-platform/Cargo.toml --check
+          cargo clippy --locked --manifest-path crates/plavno-platform/Cargo.toml --target-dir target/plavno --all-targets -- -D warnings
+
       - name: Clippy
         run: cargo clippy --locked --manifest-path '${{ matrix.manifest }}' --target-dir 'target/${{ matrix.package }}' ${{ matrix.features }} --all-targets -- -D warnings
 
@@ -96,7 +114,9 @@ jobs:
 
       - name: Check production CLI
         if: matrix.package == 'plavno'
-        run: target/plavno/debug/plavno --help
+        run: |
+          target/plavno/debug/plavno --help
+          target/plavno/debug/plavno --version
 
       - name: Native stream tests
         if: matrix.package == 'plavno'
@@ -105,3 +125,14 @@ jobs:
       - name: Chrome login protocol test
         if: matrix.package == 'plavno'
         run: cargo test --locked --target-dir target/plavno real_chrome_pipe_supports_http_only_cookies_cancellation_and_cleanup -- --ignored
+
+      - name: Preserve build cache after a failure
+        if: failure() && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/${{ matrix.package }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ matrix.package }}-${{ hashFiles(matrix.lockfile) }}

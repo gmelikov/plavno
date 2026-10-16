@@ -20,7 +20,7 @@ mod local_metadata;
 mod macos_media;
 #[cfg(target_os = "linux")]
 mod mpris;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 #[path = "mpris_stub.rs"]
 mod mpris;
 mod sixel;
@@ -31,6 +31,8 @@ mod text_selection;
 mod tui;
 mod visualization;
 mod wave;
+#[cfg(windows)]
+mod windows_media;
 
 use anyhow::{Result, bail};
 use std::{
@@ -42,8 +44,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(target_os = "macos")]
 use macos_media::MediaControls;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 use mpris::Mpris as MediaControls;
+#[cfg(windows)]
+use windows_media::MediaControls;
 
 fn main() {
     if let Err(error) = run() {
@@ -57,6 +61,10 @@ fn run() -> Result<()> {
     #[cfg(all(target_os = "macos", feature = "test-audio"))]
     if args.len() == 1 && args[0] == "--test-media-controls" {
         return macos_media::regression::run();
+    }
+    #[cfg(all(windows, feature = "test-audio"))]
+    if args.len() == 1 && args[0] == "--test-media-controls" {
+        return windows_media::regression::run();
     }
     if args.len() == 1 && (args[0] == "--version" || args[0] == "-V") {
         println!("plavno {VERSION}");
@@ -209,11 +217,14 @@ fn run() -> Result<()> {
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "The TUI requires an interactive terminal"
     );
+    // Initialize WinRT before WASAPI chooses a COM apartment for this thread.
+    #[cfg(windows)]
+    let _media_runtime = windows_media::Runtime::new()?;
     let (mut engine, events, receiver) = engine::Engine::new(backend)?;
     if favorites {
         engine.mode = backend::PlaybackMode::FavoritesShuffle;
     }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     let media_controls = match MediaControls::new(&engine, events.clone()) {
         Ok(controls) => Some(controls),
         Err(error) => {
@@ -221,7 +232,7 @@ fn run() -> Result<()> {
             None
         }
     };
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     let media_controls = None;
     tui::run(
         engine,

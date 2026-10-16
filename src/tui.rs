@@ -169,13 +169,13 @@ pub fn run(
         View::Sources(SourceView::new(engine.services.clone(), engine.source))
     };
     loop {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(controls) = &media_controls {
             controls.poll();
         }
         let artwork_changed = artwork.update(
             if (visual_enabled && view.is_player())
-                || (cfg!(target_os = "macos") && media_controls.is_some())
+                || (cfg!(any(target_os = "macos", windows)) && media_controls.is_some())
             {
                 engine
                     .media_track()
@@ -257,7 +257,7 @@ pub fn run(
         } else {
             wait
         };
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         let wait = if media_controls.is_some() {
             wait.min(Duration::from_millis(50))
         } else {
@@ -502,9 +502,9 @@ pub fn run(
         if (dirty || last_media_controls.elapsed() >= Duration::from_millis(250))
             && let Some(media_controls) = &media_controls
         {
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", windows)))]
             media_controls.update(&engine);
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             media_controls.update(
                 &engine,
                 artwork.image(

@@ -158,7 +158,7 @@ impl Artwork {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub fn image(&self, url: Option<&str>) -> Option<&Arc<RgbImage>> {
         // The engine may have changed tracks before the artwork worker was polled.
         (self.wanted.as_deref() == url)
@@ -261,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     fn now_playing_does_not_receive_the_previous_tracks_cover() {
         let artwork = artwork(RgbImage::new(2, 2));
         assert!(artwork.image(Some("cover")).is_some());
