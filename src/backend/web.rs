@@ -92,12 +92,29 @@ pub fn text(value: &str) -> String {
     html_escape::decode_html_entities(&stripped).into_owned()
 }
 
-pub fn transcode(url: String, quality: String, direct: bool) -> Result<Input> {
+pub fn transcode(url: String, quality: String) -> Result<Input> {
+    transcode_request(url, quality, false, Vec::new())
+}
+
+pub fn transcode_http(
+    url: String,
+    quality: String,
+    headers: Vec<(String, String)>,
+) -> Result<Input> {
+    transcode_request(url, quality, true, headers)
+}
+
+fn transcode_request(
+    url: String,
+    quality: String,
+    direct: bool,
+    headers: Vec<(String, String)>,
+) -> Result<Input> {
     ensure!(url.starts_with("https://"), "Insecure audio stream URL");
     Ok(Input::Pipe {
         program: std::env::current_exe()?,
         args: vec!["--stream-audio".into()],
-        request: json!({"url":url,"direct":direct}),
+        request: json!({"url":url,"direct":direct,"headers":headers}),
         quality: format!("{quality} · FLAC transport"),
     })
 }
@@ -167,6 +184,27 @@ struct Cookie {
 }
 
 impl Cookies {
+    pub fn netscape(&self) -> String {
+        let mut data = String::from("# Netscape HTTP Cookie File\n");
+        for cookie in &self.0 {
+            data.push_str(&format!(
+                "{}{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                if cookie.subdomains { "." } else { "" },
+                cookie.domain,
+                if cookie.subdomains { "TRUE" } else { "FALSE" },
+                cookie.path,
+                if cookie.secure { "TRUE" } else { "FALSE" },
+                if cookie.expires == 0 {
+                    String::new()
+                } else {
+                    cookie.expires.to_string()
+                },
+                cookie.name,
+                cookie.value
+            ));
+        }
+        data
+    }
     pub fn from_header(header: &str, site: &str) -> Result<Self> {
         ensure!(
             header.is_ascii() && !header.chars().any(char::is_control),
@@ -223,7 +261,11 @@ impl Cookies {
                 subdomains: fields[1] == "TRUE",
                 path: fields[2].into(),
                 secure: fields[3] == "TRUE",
-                expires: fields[4].parse().context("Invalid cookie expiration")?,
+                expires: if fields[4].is_empty() {
+                    0
+                } else {
+                    fields[4].parse().context("Invalid cookie expiration")?
+                },
                 name: fields[5].into(),
                 value: fields[6].into(),
             });
@@ -291,6 +333,21 @@ impl Cookies {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn netscape_export_keeps_domain_and_session_cookie_semantics() {
+        let cookies =
+            Cookies::from_header("SID=fixture-secret; pref=value", "https://www.youtube.com/")
+                .unwrap();
+        let serialized = cookies.netscape();
+        assert!(serialized.contains(".www.youtube.com\tTRUE\t/\tTRUE\t\tSID\tfixture-secret"));
+        let imported = Cookies::parse(&serialized).unwrap();
+        assert_eq!(
+            imported.header("https://www.youtube.com/").unwrap(),
+            "SID=fixture-secret; pref=value"
+        );
+        assert!(imported.header("https://other.test/").unwrap().is_empty());
+    }
 
     #[test]
     fn youtube_backups_use_signed_routing_nodes_without_changing_the_query() {

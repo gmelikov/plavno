@@ -34,7 +34,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2025]
-        package: [plavno, plavno-spotify, plavno-youtube]
+        package: [plavno, plavno-spotify]
         include:
           - package: plavno
             manifest: Cargo.toml
@@ -43,10 +43,6 @@ jobs:
           - package: plavno-spotify
             manifest: adapters/spotify/Cargo.toml
             lockfile: adapters/spotify/Cargo.lock
-            features: ''
-          - package: plavno-youtube
-            manifest: adapters/youtube/Cargo.toml
-            lockfile: adapters/youtube/Cargo.lock
             features: ''
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

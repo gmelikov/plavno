@@ -46,11 +46,12 @@ def main():
   end
 
   def install
-    bin.install "plavno", "plavno-spotify", "plavno-youtube"
+    bin.install "plavno", "plavno-spotify"
   end
 
   def caveats
     <<~EOS
+      Install yt-dlp with `brew install yt-dlp` for YouTube playback.
       Install ffmpeg with `brew install ffmpeg` for HLS playback.
       Browser-based sign-in needs Chrome or Chromium.
       The prebuilt binaries are tested on macOS 15.
@@ -60,9 +61,7 @@ def main():
   test do
     assert_match "plavno #{{version}}", shell_output("#{{bin}}/plavno --version")
     assert_match "plavno --source SOURCE", shell_output("#{{bin}}/plavno --help")
-    %w[plavno-spotify plavno-youtube].each do |helper|
-      assert_match '"error":', pipe_output("#{{bin}}/#{{helper}}", "{{}}\\n", 0)
-    end
+    assert_match '"error":', pipe_output("#{{bin}}/plavno-spotify", "{{}}\\n", 0)
   end
 end
 '''

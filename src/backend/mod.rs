@@ -7,6 +7,7 @@ mod vk;
 pub(crate) mod web;
 mod yandex;
 mod yandex_cache;
+mod youtube;
 
 pub use bridge::Bridge;
 pub use local::{Local, LocalDirectory};
@@ -17,6 +18,7 @@ pub use vk::Vk;
 pub use yandex::Yandex;
 pub use yandex::http as yandex_http;
 pub use yandex::network_error_at;
+pub use youtube::YouTube;
 
 use anyhow::Result;
 use std::path::PathBuf;
@@ -63,6 +65,7 @@ pub struct Service {
 pub enum Input {
     Http {
         url: String,
+        headers: Vec<(String, String)>,
         aes128_key: Option<[u8; 16]>,
         hint: &'static str,
         quality: String,

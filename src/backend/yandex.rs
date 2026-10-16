@@ -715,6 +715,7 @@ impl FileDownload {
             "The API returned inconsistent audio quality"
         );
         Ok(Input::Http {
+            headers: Vec::new(),
             url: self.url,
             aes128_key,
             hint,

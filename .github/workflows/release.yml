@@ -133,14 +133,14 @@ jobs:
 
       - name: Build player and helpers
         run: |
-          for manifest in Cargo.toml adapters/spotify/Cargo.toml adapters/youtube/Cargo.toml; do
+          for manifest in Cargo.toml adapters/spotify/Cargo.toml; do
             cargo build --release --locked --manifest-path "$manifest" --target "$RELEASE_TARGET" --target-dir target/distribution
           done
 
       - name: Check Linux ABI
         if: runner.os == 'Linux'
         run: |
-          for name in plavno plavno-spotify plavno-youtube; do
+          for name in plavno plavno-spotify; do
             binary="target/distribution/$RELEASE_TARGET/release/$name"
             ldd "$binary"
             max_glibc=$(readelf --version-info "$binary" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n 1)
@@ -202,15 +202,15 @@ jobs:
             gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
           else
             cat > dist/release-notes.md <<'EOF'
-          Each archive contains plavno, the Spotify and YouTube helpers, README, and license.
+          Each archive contains plavno, the Spotify helper, README, and license.
 
           - Linux x86_64 and ARM64: glibc 2.35+, ALSA (`libasound.so.2`), and D-Bus (`libdbus-1.so.3`). Audio through PipeWire/PulseAudio needs an ALSA plugin. Alpine/musl needs a separate build.
           - macOS: Apple Silicon and Intel builds, checked on macOS 15.
           - Windows 10/11 x64: MSVC build with the C runtime linked statically.
 
-          Extract the archive and put all three executables in a directory on PATH. Install ffmpeg for HLS playback; browser-based service sign-in needs Chrome/Chromium (or Edge on Windows). See README for setup and source builds.
+          Extract the archive and put both executables in a directory on PATH. Install yt-dlp separately for YouTube and ffmpeg for HLS playback; browser-based service sign-in needs Chrome/Chromium (or Edge on Windows). See README for setup and source builds.
 
-          macOS users can install the player and both helpers with `brew install gmelikov/plavno/plavno`. The tap is updated automatically after the release checks pass.
+          macOS users can install the player and Spotify helper with `brew install gmelikov/plavno/plavno`. The tap is updated automatically after the release checks pass.
           EOF
             gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --title "plavno $RELEASE_TAG" --notes-file dist/release-notes.md --repo "$GITHUB_REPOSITORY"
           fi

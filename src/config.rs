@@ -29,7 +29,7 @@ pub fn backends_with_overrides(
     directory: Option<PathBuf>,
     seed: Option<(&str, &str)>,
 ) -> Result<Registry> {
-    use crate::backend::{Backend, Bridge, Service, SoundCloud, Vk};
+    use crate::backend::{Backend, Bridge, Service, SoundCloud, Vk, YouTube};
     if let Some((source, seed)) = seed {
         ensure!(
             matches!(source, "ytmusic" | "soundcloud" | "spotify"),
@@ -82,8 +82,10 @@ pub fn backends_with_overrides(
             status: if seed.is_some() && ready {
                 "Session radio override".into()
             } else if ready {
-                if matches!(key, "spotify" | "ytmusic") {
+                if key == "spotify" {
                     "Configured · native adapter required".into()
+                } else if key == "ytmusic" {
+                    "Configured · yt-dlp required".into()
                 } else {
                     "Configured · native backend".into()
                 }
@@ -95,6 +97,7 @@ pub fn backends_with_overrides(
             backends.push(match key {
                 "soundcloud" => Box::new(SoundCloud::new(path).with_seed(seed)),
                 "vk" => Box::new(Vk::new(path)),
+                "ytmusic" => Box::new(YouTube::new(path).with_seed(seed)),
                 _ => Box::new(Bridge::new(key, name, path).with_seed(seed)),
             });
         }

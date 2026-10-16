@@ -286,6 +286,7 @@ struct HttpReader {
     http: ureq::Agent,
     url: String,
     fallbacks: VecDeque<String>,
+    headers: Vec<(String, String)>,
     chunk: io::Cursor<Vec<u8>>,
     downloaded: u64,
     total: Option<u64>,
@@ -299,6 +300,7 @@ impl HttpReader {
         Self {
             http: yandex_http(),
             fallbacks: crate::backend::web::youtube_fallbacks(&url).into(),
+            headers: Vec::new(),
             url,
             chunk: io::Cursor::new(Vec::new()),
             downloaded: 0,
@@ -355,19 +357,18 @@ impl HttpReader {
             if self.total.is_some_and(|total| self.downloaded >= total) {
                 return Ok(0);
             }
-            let mut response = self
-                .http
-                .get(&self.url)
-                .header(
-                    "Range",
-                    &format!(
-                        "bytes={}-{}",
-                        self.downloaded,
-                        self.downloaded + self.next_chunk_size as u64 - 1
-                    ),
-                )
-                .call()
-                .map_err(|error| self.request_error(error))?;
+            let mut request = self.http.get(&self.url).header(
+                "Range",
+                &format!(
+                    "bytes={}-{}",
+                    self.downloaded,
+                    self.downloaded + self.next_chunk_size as u64 - 1
+                ),
+            );
+            for (name, value) in &self.headers {
+                request = request.header(name, value);
+            }
+            let mut response = request.call().map_err(|error| self.request_error(error))?;
             let mut expected_length = None;
             match response.status().as_u16() {
                 206 => {
@@ -467,8 +468,9 @@ impl Read for HttpReader {
     }
 }
 
-pub fn http_stream(url: String) -> impl Read + Send {
+pub fn http_stream(url: String, headers: Vec<(String, String)>) -> impl Read + Send {
     let mut reader = HttpReader::new(url, None);
+    reader.headers = headers;
     reader.next_chunk_size = HTTP_SEEK_CHUNK;
     reader
 }
@@ -902,11 +904,13 @@ pub fn cache_input(input: Input) -> Result<Arc<CachedAudio>> {
         }
         Input::Http {
             url,
+            headers,
             aes128_key,
             hint,
             quality,
         } => {
             let mut reader = HttpReader::new(url, aes128_key);
+            reader.headers = headers;
             reader
                 .read_exact(&mut [0u8; 1])
                 .context("Failed to open the audio stream")?;
@@ -1919,6 +1923,7 @@ mod tests {
                 }
                 let server = DelayedRangeServer::new(bytes);
                 let input = Input::Http {
+                    headers: Vec::new(),
                     url: server.url.clone(),
                     aes128_key: key,
                     hint,
@@ -2009,6 +2014,7 @@ mod tests {
                 let cancel = Arc::new(AtomicBool::new(false));
                 let prepared = prepare(
                     Input::Http {
+                        headers: Vec::new(),
                         url,
                         aes128_key: key,
                         hint,
@@ -2078,6 +2084,7 @@ mod tests {
             }
             let (url, stop, server) = range_server(wire);
             let buffer = cache_input(Input::Http {
+                headers: Vec::new(),
                 url,
                 aes128_key: key,
                 hint: "mp3",
@@ -2132,6 +2139,7 @@ mod tests {
         let bytes: Vec<_> = (0..HTTP_CHUNK * 4 + 123).map(|i| (i % 251) as u8).collect();
         let server = DelayedRangeServer::new(bytes.clone());
         let cache = cache_input(Input::Http {
+            headers: Vec::new(),
             url: server.url.clone(),
             aes128_key: None,
             hint: "mp3",
@@ -2228,6 +2236,7 @@ mod tests {
         let (url, stop, server) = range_server(bytes);
         let result = prepare(
             Input::Http {
+                headers: Vec::new(),
                 url,
                 aes128_key: Some(key),
                 hint: "m4a",
@@ -2466,6 +2475,7 @@ mod tests {
                     let cancel = Arc::new(AtomicBool::new(false));
                     let mut prepared = prepare_at(
                         cache_input(Input::Http {
+                            headers: Vec::new(),
                             url: url.clone(),
                             aes128_key: key,
                             hint,

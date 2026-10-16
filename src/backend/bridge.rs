@@ -58,11 +58,7 @@ impl Bridge {
     }
 
     fn command(&self) -> (PathBuf, Vec<String>) {
-        let (name, variable) = if self.key == "spotify" {
-            ("plavno-spotify", "PLAVNO_SPOTIFY_HELPER")
-        } else {
-            ("plavno-youtube", "PLAVNO_YOUTUBE_HELPER")
-        };
+        let (name, variable) = ("plavno-spotify", "PLAVNO_SPOTIFY_HELPER");
         (
             helper_program(
                 name,
@@ -155,54 +151,39 @@ impl Backend for Bridge {
             .context("The service did not provide a full audio stream")?
             .to_owned();
         ensure!(url.starts_with("https://"), "Insecure service stream URL");
-        if self.key == "spotify" {
-            let bytes = value["key"]
-                .as_array()
-                .context("Missing Spotify audio key")?;
-            let key: Vec<u8> = bytes
-                .iter()
-                .map(|b| {
-                    b.as_u64()
-                        .filter(|b| *b < 256)
-                        .map(|b| b as u8)
-                        .context("Invalid audio key")
-                })
-                .collect::<Result<_>>()?;
-            let key: [u8; 16] = key
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("Invalid audio key length"))?;
-            let hint = match value["hint"].as_str() {
-                Some("flac") => "flac",
-                Some("mp3") => "mp3",
-                _ => "ogg",
-            };
-            Ok(Input::Stream {
-                url,
-                key: Some(key),
-                iv: [
-                    0x72, 0xe0, 0x67, 0xfb, 0xdd, 0xcb, 0xcf, 0x77, 0xeb, 0xe8, 0xbc, 0x64, 0x3f,
-                    0x63, 0x0d, 0x93,
-                ],
-                skip: value["skip"].as_u64().unwrap_or(0),
-                hint,
-                quality: value["quality"].as_str().unwrap_or("Spotify audio").into(),
+        let bytes = value["key"]
+            .as_array()
+            .context("Missing Spotify audio key")?;
+        let key: Vec<u8> = bytes
+            .iter()
+            .map(|b| {
+                b.as_u64()
+                    .filter(|b| *b < 256)
+                    .map(|b| b as u8)
+                    .context("Invalid audio key")
             })
-        } else {
-            let quality = value["quality"]
-                .as_str()
-                .unwrap_or("YouTube Music audio")
-                .to_owned();
-            if value["transcode"].as_bool() == Some(true) {
-                return super::web::transcode(url, quality, true);
-            }
-            Ok(Input::Http {
-                url,
-                aes128_key: None,
-                hint: "m4a",
-                quality,
-            })
-        }
+            .collect::<Result<_>>()?;
+        let key: [u8; 16] = key
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Invalid audio key length"))?;
+        let hint = match value["hint"].as_str() {
+            Some("flac") => "flac",
+            Some("mp3") => "mp3",
+            _ => "ogg",
+        };
+        Ok(Input::Stream {
+            url,
+            key: Some(key),
+            iv: [
+                0x72, 0xe0, 0x67, 0xfb, 0xdd, 0xcb, 0xcf, 0x77, 0xeb, 0xe8, 0xbc, 0x64, 0x3f, 0x63,
+                0x0d, 0x93,
+            ],
+            skip: value["skip"].as_u64().unwrap_or(0),
+            hint,
+            quality: value["quality"].as_str().unwrap_or("Spotify audio").into(),
+        })
     }
+
     fn feedback(&mut self, _: &Track, _: Feedback, _: f64) -> Result<()> {
         Ok(())
     }
@@ -224,21 +205,20 @@ mod tests {
         ));
         std::fs::create_dir(&directory).unwrap();
         let player = directory.join(format!("plavno{}", std::env::consts::EXE_SUFFIX));
-        for name in ["plavno-youtube", "plavno-spotify"] {
-            assert_eq!(
-                helper_program(name, None, Some(&player)),
-                PathBuf::from(name)
-            );
-            let helper = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-            std::fs::write(&helper, b"fixture").unwrap();
-            assert_eq!(helper_program(name, None, Some(&player)), helper);
-            let explicit = directory.join("explicit-helper");
-            assert_eq!(
-                helper_program(name, Some(explicit.clone().into_os_string()), Some(&player)),
-                explicit
-            );
-            assert_eq!(helper_program(name, None, None), PathBuf::from(name));
-        }
+        let name = "plavno-spotify";
+        assert_eq!(
+            helper_program(name, None, Some(&player)),
+            PathBuf::from(name)
+        );
+        let helper = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&helper, b"fixture").unwrap();
+        assert_eq!(helper_program(name, None, Some(&player)), helper);
+        let explicit = directory.join("explicit-helper");
+        assert_eq!(
+            helper_program(name, Some(explicit.clone().into_os_string()), Some(&player)),
+            explicit
+        );
+        assert_eq!(helper_program(name, None, None), PathBuf::from(name));
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

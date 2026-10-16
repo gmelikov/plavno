@@ -21,7 +21,7 @@ def check_binaries(directory, suffix, version):
     if result.stdout.strip() != f"plavno {version}":
         raise RuntimeError(f"Unexpected player version: {result.stdout.strip()}")
     subprocess.run([str(player), "--help"], check=True, capture_output=True, timeout=30)
-    for name in ("plavno-spotify", "plavno-youtube"):
+    for name in ("plavno-spotify",):
         # Missing profile/method must fail locally, before contacting any service.
         result = subprocess.run(
             [str(directory / f"{name}{suffix}")],
@@ -65,7 +65,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="plavno-release-") as temporary:
         stage = Path(temporary) / "package"
         stage.mkdir()
-        for name in ("plavno", "plavno-spotify", "plavno-youtube"):
+        for name in ("plavno", "plavno-spotify"):
             executable = stage / f"{name}{suffix}"
             shutil.copy2(args.binary_dir / executable.name, executable)
             executable.chmod(0o755)

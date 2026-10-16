@@ -1124,9 +1124,10 @@ impl Backend for Vk {
             regex_lite::Regex::new(r"/[0-9a-f]+(/audios)?/([0-9a-f]+)/index\.m3u8").unwrap();
         let link = pattern.replace(link, "${1}/${2}.mp3").into_owned();
         if link.contains(".m3u8") {
-            return web::transcode(link, "VK Music · service audio".into(), false);
+            return web::transcode(link, "VK Music · service audio".into());
         }
         Ok(Input::Http {
+            headers: Vec::new(),
             url: link,
             aes128_key: None,
             hint: "mp3",

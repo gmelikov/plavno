@@ -1,8 +1,8 @@
 # Releases
 
 The main package is `plavno`. GitHub Release archives bundle the player and the
-separate `plavno-spotify` and `plavno-youtube` executables. The archive version
-follows the player; helper Cargo packages retain their own versions and lockfiles.
+separate `plavno-spotify` executable. The archive version
+follows the player; the helper Cargo package retains its own version and lockfile.
 
 ## Binary distribution
 
@@ -16,11 +16,11 @@ The [release workflow](../.github/workflows/release.yml) produces five archives:
 | macOS Intel | macOS 15 Intel | tar.gz |
 | Windows x64 | Windows Server 2025, MSVC, static C runtime | zip |
 
-Every build uses `--release --locked` for all three Cargo manifests, packages
-the three binaries with README and license, extracts the archive, and checks
-the player CLI and both helpers' JSON protocol. Protocol checks use an empty
+Every build uses `--release --locked` for both Cargo manifests, packages
+the two binaries with README and license, extracts the archive, and checks
+the player CLI and the Spotify helper's JSON protocol. Protocol checks use an empty
 request and require a local error response; they need no credentials or network.
-Linux builds inspect the glibc requirements of **all three** executables and fail
+Linux builds inspect the glibc requirements of **both** executables and fail
 if any requires a version newer than 2.35. Runtime prerequisites are listed in
 the [README](../README.md#quick-start).
 
@@ -66,7 +66,7 @@ brew install gmelikov/plavno/plavno
 ```
 
 The formula installs prebuilt Apple Silicon or Intel executables: the player and
-both helpers. Rust is not required. ffmpeg remains optional for HLS; browser-based
+the Spotify helper. Rust is not required. yt-dlp is installed separately for YouTube. ffmpeg remains optional for HLS; browser-based
 sign-in needs Chrome/Chromium. The old v0.3.0 release contains only Linux binaries,
 so it cannot populate the tap. v0.3.1 is the first release that publishes the formula.
 

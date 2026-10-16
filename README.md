@@ -37,13 +37,13 @@ brew install gmelikov/plavno/plavno
 This installs the player and both service helpers. Alternatively, download the
 `*-macos-aarch64.tar.gz` (Apple Silicon) or `*-macos-x86_64.tar.gz` (Intel) archive from
 [GitHub Releases](https://github.com/gmelikov/plavno/releases/latest) and put all
-three executables together. Run `./plavno`, or add the directory to PATH.
+two executables together. Run `./plavno`, or add the directory to PATH.
 
 ### Linux
 
 Download the `*-linux-x86_64-gnu.tar.gz` or `*-linux-aarch64-gnu.tar.gz` archive from
 [GitHub Releases](https://github.com/gmelikov/plavno/releases/latest). Extract it
-and keep `plavno`, `plavno-spotify`, and `plavno-youtube` together. Run `./plavno`,
+and keep `plavno` and `plavno-spotify` together. Run `./plavno`,
 or put all three in a directory on PATH, such as `~/.local/bin`.
 
 Requires glibc 2.35+, ALSA and D-Bus. Install the runtime packages for your distribution:
@@ -65,7 +65,7 @@ enables media keys and Now Playing. Alpine/musl requires a separate source build
 
 On Windows 10/11 x64, download the `*-windows-x86_64-msvc.zip` archive from
 [GitHub Releases](https://github.com/gmelikov/plavno/releases/latest). Extract it,
-keeping `plavno.exe`, `plavno-spotify.exe`, and `plavno-youtube.exe` together.
+keeping `plavno.exe` and `plavno-spotify.exe` together.
 Add the extracted folder to your user PATH and open a new Windows Terminal.
 
 ### Connect and play
@@ -79,7 +79,7 @@ with `plavno --source SOURCE`. For local music, run `plavno local /path/to/music
 then `plavno --source local`.
 
 Install ffmpeg and make it available on PATH for HLS playback and conversion of
-formats such as YouTube Opus/WebM. Browser-based
+formats such as YouTube Opus/WebM. YouTube also needs yt-dlp installed separately. Browser-based
 service sign-in needs Chrome/Chromium, or Edge on Windows. These external programs
 are not included in the archives. On macOS, use `brew install ffmpeg`.
 `PLAVNO_FFMPEG` and `PLAVNO_BROWSER` override their paths.
@@ -92,7 +92,7 @@ are not included in the archives. On macOS, use `brew install ffmpeg`.
 | VK Music | `vk` | 🟢 | Recommendations, My Music shuffle, flow presets | Installed Chrome/Chromium or manual session import |
 | SoundCloud | `soundcloud` | — | Track stations | Browser sign-in or a public seed track |
 | Spotify | `spotify` | — | Track radio | Optional Rust helper; Premium and OAuth |
-| YouTube Music | `ytmusic` | — | Home mixes and track radio | Optional Rust helper; cookies or a public seed |
+| YouTube Music | `ytmusic` | — | Home mixes and track radio | External yt-dlp; cookies or a public seed |
 | Local music | `local` | — | Recursive directory shuffle | A local music directory |
 
 ### Yandex Music
@@ -123,6 +123,10 @@ A saved profile seed is also supported; `--seed` overrides it for this run.
 
 ### YouTube Music
 
+Install [yt-dlp](https://github.com/yt-dlp/yt-dlp#installation) separately and make it
+available on PATH. On Debian/Ubuntu, run `sudo apt install yt-dlp`; on macOS,
+run `brew install yt-dlp`. It is optional and is not bundled with plavno.
+
 For public track radio, no login is needed:
 
 ```sh
@@ -135,7 +139,7 @@ then start with `plavno --source ytmusic`.
 `--seed` uses any saved credentials and overrides the saved seed or mix for this
 run without changing the profile. Live streams are not supported.
 
-Homebrew and release archives include both helpers. Cargo installations need
+Homebrew and release archives include the Spotify helper. Cargo installations need
 [separate helper builds](docs/services.md#spotify-and-youtube-music).
 See [service setup](docs/services.md) for profile examples and troubleshooting.
 
@@ -277,7 +281,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-CI checks the player and both helpers on Linux, macOS 15 (Apple Silicon and
+CI checks the player and Spotify helper on Linux, macOS 15 (Apple Silicon and
 Intel), and Windows Server 2025. Windows tests exercise native SMTC, ConPTY,
 private ACLs, the Chrome pipe protocol and streamed audio.
 `cargo test --locked --features test-audio` also runs the PTY UI tests on macOS

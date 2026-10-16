@@ -306,13 +306,14 @@ impl Backend for SoundCloud {
             };
             if let Some(hint) = hint {
                 return Ok(Input::Http {
+                    headers: Vec::new(),
                     url: url.into(),
                     aes128_key: None,
                     hint,
                     quality: "SoundCloud · original upload".into(),
                 });
             }
-            return web::transcode(url.into(), "SoundCloud · original upload".into(), false);
+            return web::transcode(url.into(), "SoundCloud · original upload".into());
         }
         let mut formats: Vec<_> = info["media"]["transcodings"]
             .as_array()
@@ -363,13 +364,14 @@ impl Backend for SoundCloud {
                 && matches!(mime, "audio/mpeg" | "audio/mp3" | "audio/mp4")
             {
                 return Ok(Input::Http {
+                    headers: Vec::new(),
                     url: url.into(),
                     aes128_key: None,
                     hint: if mime == "audio/mp4" { "m4a" } else { "mp3" },
                     quality,
                 });
             }
-            return web::transcode(url.into(), quality, false);
+            return web::transcode(url.into(), quality);
         }
         anyhow::bail!("No playable full SoundCloud audio stream")
     }

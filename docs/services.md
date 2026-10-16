@@ -86,29 +86,29 @@ Token or Netscape `cookies` may be needed for account access.
 
 ## Spotify and YouTube Music
 
-Release archives include both helpers. Keep them next to the player; no helper
-build is needed when using those archives. Run `./plavno` (`.\plavno.exe` on
-Windows), or put all three executables on PATH. `PLAVNO_SPOTIFY_HELPER` and
-`PLAVNO_YOUTUBE_HELPER` override discovery; otherwise the player searches its own
-directory first, then PATH.
+Release archives include the Spotify helper. Keep `plavno-spotify` next to the
+player, or put it on PATH. `PLAVNO_SPOTIFY_HELPER` overrides discovery; otherwise
+the player searches its own directory first, then PATH.
 
-For a source checkout or a Cargo installation, build only the helper you need.
-These dependencies do not affect normal player edits.
+For a source checkout or Cargo installation, build it separately:
 
 ```sh
 cargo build --locked --release --manifest-path adapters/spotify/Cargo.toml --target-dir target/spotify
 export PLAVNO_SPOTIFY_HELPER="$PWD/target/spotify/release/plavno-spotify"
-cargo build --locked --release --manifest-path adapters/youtube/Cargo.toml --target-dir target/youtube
-export PLAVNO_YOUTUBE_HELPER="$PWD/target/youtube/release/plavno-youtube"
 ```
 
-Alternatively, put `plavno-spotify` / `plavno-youtube` on PATH. Run
-`plavno login spotify` or `plavno login ytmusic` and paste a profile:
+YouTube uses an external [yt-dlp](https://github.com/yt-dlp/yt-dlp#installation),
+installed by the user. On Debian/Ubuntu, run `sudo apt install yt-dlp`; on macOS,
+run `brew install yt-dlp`. On Windows, put `yt-dlp.exe` on PATH. yt-dlp is optional
+for other sources and is not included in release archives or installed by the
+Homebrew formula. `PLAVNO_YT_DLP` overrides its executable path.
+
+Run `plavno login spotify` or `plavno login ytmusic` and paste a profile:
 
 | Service | Profile example | Requirements |
 |---|---|---|
 | Spotify | `{"token":"ACCESS_TOKEN","client_id":"OAUTH_CLIENT_ID"}` | Premium; OAuth token with `streaming` scope. Pass `--seed spotify:track:TRACK_ID` when starting playback, or add `seed` to the profile. Reusable credentials are saved privately. |
-| YouTube Music | `{"cookies":"/absolute/path/youtube-cookies.txt"}` | Netscape cookies for home mixes. Saved seeds (`{"seed":"VIDEO_ID_OR_URL"}`) and playlists (`{"playlist":"MIX_PLAYLIST_ID"}`) are also supported. |
+| YouTube Music | `{"cookies":"/absolute/path/youtube-cookies.txt"}` | Private Netscape cookies for the personal `RDMM` mix. Saved seeds (`{"seed":"VIDEO_ID_OR_URL"}`) and playlists (`{"playlist":"PLAYLIST_ID"}`) are also supported. Cookies are passed through a temporary private copy; the original file is preserved. Legacy `headers` profiles with a Cookie header remain supported. |
 
 To start public YouTube Music radio without creating a connection profile:
 
@@ -123,12 +123,15 @@ and source switching. The connection profile is not changed. SoundCloud and
 YouTube Music can use a public seed without login; Spotify requires saved
 credentials and Premium. Select one of these sources explicitly; `--seed`
 cannot be combined with `--source mixed`, `--favorites`, or `--file`.
-Rebuild the helpers along with the player when updating a source installation.
+Rebuild the Spotify helper when updating a source installation.
 
-YouTube web streams may need
-[rustypipe-botguard](https://codeberg.org/ThetaDev/rustypipe-botguard) on PATH,
-or `"botguard":"/absolute/path/rustypipe-botguard"` in the profile.
-Both helpers select supported full audio at the best available quality.
+yt-dlp fetches bounded flat playlist batches and resolves audio URLs only for
+tracks selected for playback or adjacent preloading. It does not download audio.
+The existing Rust RAM cache handles download, seeking, and replay; the yt-dlp
+process exits after each metadata request. No signed URL cache is written to disk.
+HTTP 429 pauses further metadata requests, with a private account-scoped cooldown
+that survives restarts. Update yt-dlp if YouTube changes break extraction.
+
 YouTube Opus/WebM streams require ffmpeg on PATH, or `PLAVNO_FFMPEG` pointing to
 its executable. Playback errors distinguish conversion failures from CDN HTTP
 errors, timeouts, and TLS failures without displaying signed stream URLs.

@@ -103,6 +103,7 @@ fn serve(
         .next()
         .unwrap();
     let mut range = None;
+    let mut user_agent = String::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
@@ -111,16 +112,20 @@ fn serve(
         if let Some(value) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
             range = Some(value.trim().to_owned());
         }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("user-agent:") {
+            user_agent = value.trim().to_owned();
+        }
     }
     let Some(bytes) = files.get(path) else {
         let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
         return;
     };
     if path.ends_with("webm")
-        && range
-            .as_ref()
-            .and_then(|r| r.split_once('-'))
-            .is_none_or(|(_, end)| end.is_empty())
+        && (user_agent != "plavno-native-test"
+            || range
+                .as_ref()
+                .and_then(|r| r.split_once('-'))
+                .is_none_or(|(_, end)| end.is_empty()))
     {
         let _ = socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
         return;
@@ -279,7 +284,7 @@ fn check(hls: bool, encrypted: bool, opus: bool) {
         )
         .unwrap(),
     );
-    let request = serde_json::json!({"url":format!("{}/{}",server.url,if hls {"list.m3u8"} else if opus {"audio.webm"} else {"audio.flac"}),"direct":opus});
+    let request = serde_json::json!({"url":format!("{}/{}",server.url,if hls {"list.m3u8"} else if opus {"audio.webm"} else {"audio.flac"}),"direct":opus,"headers":[["User-Agent","plavno-native-test"]]});
     writeln!(process.0.stdin.take().unwrap(), "{request}").unwrap();
     let mut stdout = process.0.stdout.take().unwrap();
     let (ready, started) = mpsc::channel();

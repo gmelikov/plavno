@@ -126,6 +126,11 @@ fn convert() -> Result<()> {
     let url = request["url"].as_str().context("Missing stream URL")?;
     let list = playlist(url)?;
     let direct = request["direct"].as_bool() == Some(true);
+    let headers: Vec<(String, String)> = if request["headers"].is_null() {
+        Vec::new()
+    } else {
+        serde_json::from_value(request["headers"].clone()).context("Invalid stream headers")?
+    };
     let program = std::env::var_os("PLAVNO_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
     let mut command = Command::new(program);
     command.args(["-nostdin", "-hide_banner", "-loglevel", "error"]);
@@ -165,7 +170,7 @@ fn convert() -> Result<()> {
     let download = if direct {
         let url = url.to_owned();
         Some(std::thread::spawn(move || {
-            io::copy(&mut crate::audio::http_stream(url), &mut stdin)
+            io::copy(&mut crate::audio::http_stream(url, headers), &mut stdin)
         }))
     } else {
         if let Err(error) = stdin.write_all(list.as_bytes()) {
