@@ -16,6 +16,8 @@ A lightweight TUI player for Linux and macOS with music streams from popular ser
 
 - **MPRIS desktop integration (Linux)** — control playback with media keys, desktop media
   widgets, or `playerctl`. Track information and album artwork appear in desktop controls.
+- **macOS media controls** — media keys and headphone buttons control playback;
+  Now Playing publishes track information, artwork, playback position and speed.
 - **Service waves and shuffle** — Yandex My Vibe, VK recommendations, library shuffle,
   and Wave Shuffle across connected services.
 - **Likes and dislikes** — like/unlike in Yandex or VK, exclude unwanted tracks, and undo dislikes.
@@ -48,8 +50,9 @@ On macOS, build from the checkout below after installing Rust and Xcode Command
 Line Tools (`xcode-select --install`). Playback uses the CoreAudio default output;
 ALSA and D-Bus are not required. Install ffmpeg with `brew install ffmpeg` for HLS.
 Chrome/Chromium is detected in `/Applications`, `~/Applications`, or PATH.
-Desktop media controls use MPRIS on Linux. macOS media keys and Now Playing are
-not integrated yet; use the TUI controls. Sixel rendering needs a terminal with sixel support;
+Desktop media controls use MPRIS on Linux and MediaPlayer on macOS. The macOS
+integration handles play/pause, stop, next/previous, position and playback speed;
+it runs without a Dock icon or a separate window. Sixel rendering needs a terminal with sixel support;
 the default braille renderer works without it.
 
 To build from source:

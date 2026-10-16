@@ -79,6 +79,12 @@ jobs:
       - name: Check formatting
         run: cargo fmt --manifest-path '${{ matrix.manifest }}' --check
 
+      # Check the native runtime before the longer suite so framework exceptions
+      # are reported directly, with diagnostics enabled by test-audio.
+      - name: macOS media controls
+        if: matrix.package == 'plavno' && runner.os == 'macOS'
+        run: cargo test --locked --target-dir target/plavno --features test-audio --test macos_media -- --ignored
+
       - name: Clippy
         run: cargo clippy --locked --manifest-path '${{ matrix.manifest }}' --target-dir 'target/${{ matrix.package }}' ${{ matrix.features }} --all-targets -- -D warnings
 

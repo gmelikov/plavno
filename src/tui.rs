@@ -1,4 +1,5 @@
 use crate::{
+    MediaControls,
     artwork::Artwork,
     backend::PlaybackMode,
     cached_frame::CachedFrame,
@@ -6,7 +7,6 @@ use crate::{
     engine::{Command, Engine, Event},
     flow_view::{self, FlowView},
     history_view::{Action, HistoryView},
-    mpris::Mpris,
     source_view::{self, SourceView},
     text_selection::{self, TextSelection},
     visualization::{Mode, Options, Renderer, Visualization},
@@ -118,7 +118,7 @@ pub fn run(
     mut engine: Engine,
     events: std::sync::mpsc::Sender<Event>,
     receiver: std::sync::mpsc::Receiver<Event>,
-    mpris: Option<Mpris>,
+    media_controls: Option<MediaControls>,
     wave_enabled: bool,
     options: Options,
 ) -> Result<()> {
@@ -160,7 +160,7 @@ pub fn run(
     let mut scene: Option<Scene> = None;
     let mut dirty = true;
     let mut last_draw = Instant::now();
-    let mut last_mpris = Instant::now();
+    let mut last_media_controls = Instant::now();
     let mut controls = Controls::default();
     let mut selection = TextSelection::default();
     let mut view = if engine.services.iter().any(|service| service.available) {
@@ -169,13 +169,21 @@ pub fn run(
         View::Sources(SourceView::new(engine.services.clone(), engine.source))
     };
     loop {
-        let artwork_changed = artwork.update(if visual_enabled && view.is_player() {
-            engine
-                .media_track()
-                .and_then(|track| track.cover_url.as_deref())
-        } else {
-            None
-        });
+        #[cfg(target_os = "macos")]
+        if let Some(controls) = &media_controls {
+            controls.poll();
+        }
+        let artwork_changed = artwork.update(
+            if (visual_enabled && view.is_player())
+                || (cfg!(target_os = "macos") && media_controls.is_some())
+            {
+                engine
+                    .media_track()
+                    .and_then(|track| track.cover_url.as_deref())
+            } else {
+                None
+            },
+        );
         dirty |= artwork_changed;
         if artwork_changed {
             scene = None;
@@ -246,6 +254,12 @@ pub fn run(
         };
         let wait = if engine.is_scrubbing() {
             wait.min(Duration::from_millis(10))
+        } else {
+            wait
+        };
+        #[cfg(target_os = "macos")]
+        let wait = if media_controls.is_some() {
+            wait.min(Duration::from_millis(50))
         } else {
             wait
         };
@@ -485,11 +499,21 @@ pub fn run(
         if dirty {
             scene = None;
         }
-        if (dirty || last_mpris.elapsed() >= Duration::from_millis(250))
-            && let Some(mpris) = &mpris
+        if (dirty || last_media_controls.elapsed() >= Duration::from_millis(250))
+            && let Some(media_controls) = &media_controls
         {
-            mpris.update(&engine);
-            last_mpris = Instant::now();
+            #[cfg(not(target_os = "macos"))]
+            media_controls.update(&engine);
+            #[cfg(target_os = "macos")]
+            media_controls.update(
+                &engine,
+                artwork.image(
+                    engine
+                        .media_track()
+                        .and_then(|track| track.cover_url.as_deref()),
+                ),
+            );
+            last_media_controls = Instant::now();
         }
         if view.wants_frames(&engine, visual_enabled.then_some(&visual))
             && last_draw.elapsed() >= frame_interval
@@ -498,8 +522,7 @@ pub fn run(
         }
     }
     let done = engine.shutdown();
-    #[cfg(target_os = "linux")]
-    drop(mpris);
+    drop(media_controls);
     drop(guard);
     if done.recv_timeout(Duration::from_secs(2)).is_err() {
         eprintln!("plavno: final playback feedback was not confirmed; stopping the wait");

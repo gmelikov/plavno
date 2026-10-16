@@ -16,9 +16,11 @@ mod flow_view;
 mod history;
 mod history_view;
 mod local_metadata;
+#[cfg(target_os = "macos")]
+mod macos_media;
 #[cfg(target_os = "linux")]
 mod mpris;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[path = "mpris_stub.rs"]
 mod mpris;
 mod sixel;
@@ -38,6 +40,11 @@ use std::{
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(target_os = "macos")]
+use macos_media::MediaControls;
+#[cfg(not(target_os = "macos"))]
+use mpris::Mpris as MediaControls;
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("plavno: {error:#}");
@@ -47,6 +54,10 @@ fn main() {
 
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    #[cfg(all(target_os = "macos", feature = "test-audio"))]
+    if args.len() == 1 && args[0] == "--test-media-controls" {
+        return macos_media::regression::run();
+    }
     if args.len() == 1 && (args[0] == "--version" || args[0] == "-V") {
         println!("plavno {VERSION}");
         return Ok(());
@@ -202,21 +213,21 @@ fn run() -> Result<()> {
     if favorites {
         engine.mode = backend::PlaybackMode::FavoritesShuffle;
     }
-    #[cfg(target_os = "linux")]
-    let mpris = match mpris::Mpris::new(&engine, events.clone()) {
-        Ok(mpris) => Some(mpris),
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let media_controls = match MediaControls::new(&engine, events.clone()) {
+        Ok(controls) => Some(controls),
         Err(error) => {
-            eprintln!("plavno: MPRIS unavailable: {error:#}");
+            eprintln!("plavno: desktop media controls unavailable: {error:#}");
             None
         }
     };
-    #[cfg(not(target_os = "linux"))]
-    let mpris = None;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let media_controls = None;
     tui::run(
         engine,
         events,
         receiver,
-        mpris,
+        media_controls,
         !no_wave,
         visualization::Options {
             mode: visual_mode,

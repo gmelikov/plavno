@@ -157,6 +157,14 @@ impl Artwork {
             }
         }
     }
+
+    #[cfg(target_os = "macos")]
+    pub fn image(&self, url: Option<&str>) -> Option<&Arc<RgbImage>> {
+        // The engine may have changed tracks before the artwork worker was polled.
+        (self.wanted.as_deref() == url)
+            .then_some(self.image.as_ref())
+            .flatten()
+    }
 }
 
 impl Drop for Artwork {
@@ -250,6 +258,15 @@ mod tests {
         assert_eq!(artwork.raster.as_ref().unwrap().as_ptr(), raster);
         artwork.render(Rect::new(1, 1, 10, 3), &mut buffer);
         assert_eq!(artwork.raster.as_ref().unwrap().dimensions(), (10, 6));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn now_playing_does_not_receive_the_previous_tracks_cover() {
+        let artwork = artwork(RgbImage::new(2, 2));
+        assert!(artwork.image(Some("cover")).is_some());
+        assert!(artwork.image(Some("next-cover")).is_none());
+        assert!(artwork.image(None).is_none());
     }
 
     #[test]
