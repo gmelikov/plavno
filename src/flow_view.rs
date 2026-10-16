@@ -105,8 +105,13 @@ impl FlowView {
         .margin(1)
         .split(frame.area());
         frame.render_widget(
-            Paragraph::new("1–4 choose · ↑/↓ select · Enter apply · Esc back")
-                .block(Block::bordered().title(format!(" plavno · Flow · {} ", self.name))),
+            Paragraph::new("1–4 choose · ↑/↓ select · Enter apply · Esc back").block(
+                Block::bordered().title(format!(
+                    " plavno {} · Flow · {} ",
+                    crate::VERSION,
+                    self.name
+                )),
+            ),
             rows[0],
         );
         let block = Block::bordered();

@@ -689,7 +689,7 @@ fn build_scene(
     let pane = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title(Line::from(format!(" plavno · {service} ")).style(accent));
+        .title(Line::from(format!(" plavno {} · {service} ", crate::VERSION)).style(accent));
     let inner = pane.inner(rows[0]);
     frame.render_widget(pane, rows[0]);
     let content = Rect::new(

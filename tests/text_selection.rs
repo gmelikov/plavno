@@ -617,7 +617,7 @@ fn tui_sixel_update_modes_preserve_menus_controls_and_resize() {
         });
         master.write_all(b"s").unwrap();
         read_until(&mut master, &mut output, |bytes| {
-            screen_text(bytes).contains("plavno · Sources")
+            screen_text(bytes).contains(concat!("plavno ", env!("CARGO_PKG_VERSION"), " · Sources"))
         });
         assert!(
             !output[last_frame(&output)..]
@@ -867,11 +867,11 @@ fn tui_compact_layout_keeps_track_text_and_controls_after_resizing() {
     read_until(&mut master, &mut output, |bytes| {
         bytes.windows(4).any(|w| w == b"tone") && bytes.windows(6).any(|w| w == b"Volume")
     });
-    assert!(
-        output
-            .windows("plavno · Local file".len())
-            .any(|w| w == "plavno · Local file".as_bytes())
-    );
+    assert!(screen_text(&output).contains(concat!(
+        "plavno ",
+        env!("CARGO_PKG_VERSION"),
+        " · Local file"
+    )));
     assert!(fixture.child.try_wait().unwrap().is_none());
     master.write_all(b"q").unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);

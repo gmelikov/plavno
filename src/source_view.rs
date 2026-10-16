@@ -127,7 +127,7 @@ impl SourceView {
         .split(frame.area());
         frame.render_widget(
             Paragraph::new("Choose a wave · Click select · Double-click / Enter play · Esc back")
-                .block(Block::bordered().title(" plavno · Sources ")),
+                .block(Block::bordered().title(format!(" plavno {} · Sources ", crate::VERSION))),
             rows[0],
         );
         let block = Block::bordered();

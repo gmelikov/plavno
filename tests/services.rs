@@ -33,6 +33,20 @@ impl Drop for ConfigDir {
 }
 
 #[test]
+fn version_is_available_without_an_account_or_terminal() {
+    let config = ConfigDir::new();
+    for flag in ["--version", "-V"] {
+        let output = config.command().arg(flag).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("plavno {}\n", env!("CARGO_PKG_VERSION"))
+        );
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
 fn sources_lists_yandex_with_and_without_a_connected_account() {
     let config = ConfigDir::new();
     for connected in [false, true] {
