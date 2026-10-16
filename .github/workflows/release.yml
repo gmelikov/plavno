@@ -212,3 +212,18 @@ jobs:
           EOF
             gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --title "plavno $RELEASE_TAG" --notes-file dist/release-notes.md --repo "$GITHUB_REPOSITORY"
           fi
+
+  homebrew:
+    name: Homebrew
+    needs: [validate, release]
+    if: ${{ !contains(needs.validate.outputs.version, '-') && !contains(needs.validate.outputs.version, '+') }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/homebrew.yml
+    with:
+      tag: ${{ needs.validate.outputs.tag }}
+      run_id: ${{ github.run_id }}
+      publish: ${{ github.event_name == 'push' || inputs.publish }}
+    secrets:
+      HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}

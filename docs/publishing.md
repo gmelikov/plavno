@@ -39,8 +39,7 @@ the code to build. Manual runs default to `publish=false`.
 
 We keep the existing workflow for native builds, archive checks, and publishing.
 Linux distribution uses archives with documented prerequisites; no Linux installer
-is needed. WinGet is deferred. A Homebrew tap is the next distribution channel;
-this workflow does not create or update that separate repository.
+is needed. WinGet is deferred. Stable releases also update the Homebrew tap below.
 
 We evaluated cargo-dist 0.33.0 with `dist plan` in a separate checkout. Importing
 the three Cargo projects normally selects only the player for tag `v0.3.0`, since
@@ -50,12 +49,62 @@ Homebrew formula. This is supported, but needs a custom build command and a
 distribution version kept in sync with Cargo.toml; ABI and protocol smoke checks
 still need our own steps. The plan was evaluated without compiling or publishing.
 
-Cargo-dist's main benefit for us would be generated Homebrew formulae and automatic
-tap updates. Reconsider it when implementing that automation. For now, the existing
-workflow covers the archive distribution scope without another release tool.
+Cargo-dist would provide generated Homebrew formulae and automatic tap updates.
+We implement these in the existing workflow and keep cargo-dist out of the release
+toolchain.
 See [multi-package behavior](https://axodotdev.github.io/cargo-dist/book/workspaces/workspace-guide.html),
 [custom builds](https://axodotdev.github.io/cargo-dist/book/custom-builds.html), and
 [Homebrew support](https://axodotdev.github.io/cargo-dist/book/installers/homebrew.html).
+
+## Homebrew tap
+
+The public tap is [gmelikov/homebrew-plavno](https://github.com/gmelikov/homebrew-plavno).
+After the first stable release containing both macOS archives, users install with:
+
+```sh
+brew install gmelikov/plavno/plavno
+```
+
+The formula installs prebuilt Apple Silicon or Intel executables: the player and
+both helpers. Rust is not required. ffmpeg remains optional for HLS; browser-based
+sign-in needs Chrome/Chromium. The old v0.3.0 release contains only Linux binaries,
+so it cannot populate the tap. Until a new stable binary release, the tap contains
+its README and CI configuration, without a formula pointing to missing downloads.
+
+After publishing a stable GitHub Release, `release.yml` calls
+[homebrew.yml](../.github/workflows/homebrew.yml). It generates the formula from
+`SHA256SUMS`, checks that the public release contains both macOS archives and
+matching checksums, and runs `brew install` and `brew test` on Apple Silicon and
+Intel. The tests serve the CI archives over loopback HTTP, keeping their hashes
+and formula installation logic unchanged. No service credentials are needed.
+Only then does CI commit `Formula/plavno.rb` to the tap. Prerelease/build-metadata
+tags do not update Homebrew; old release runs cannot downgrade an existing formula.
+Unchanged formulae do not create commits. The tap has its own CI against public
+downloads for both architectures.
+
+Publication uses the `HOMEBREW_TAP_DEPLOY_KEY` Actions secret in `gmelikov/plavno`.
+Its public key is a write-enabled deploy key on **only** `gmelikov/homebrew-plavno`;
+the workflow's GitHub token needs read access only. To rotate it, replace that
+deploy key and the secret with a newly generated pair. Never commit the private key.
+
+Test generation, installation, and SSH publishing access against an existing
+Release workflow run without changing the tap or publishing a GitHub Release:
+
+```sh
+gh workflow run homebrew.yml --ref master \
+  -f tag=v0.3.0 -f run_id=38889917612 -f publish=false
+```
+
+The normal Release workflow also performs these checks for stable preview builds.
+To retry just the Homebrew update after an actual release (use its run ID):
+
+```sh
+gh workflow run homebrew.yml --ref master \
+  -f tag=v0.3.1 -f run_id=RELEASE_RUN_ID -f publish=true
+```
+
+`publish=true` requires existing public release assets and matching checksums;
+preview archives alone cannot be published to the tap.
 
 ## Trusted Publishing
 

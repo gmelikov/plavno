@@ -30,6 +30,16 @@ A lightweight TUI player for Linux, macOS and Windows with music streams from po
 
 ## Quick start
 
+Homebrew on macOS uses the [gmelikov tap](https://github.com/gmelikov/homebrew-plavno):
+
+```sh
+brew install gmelikov/plavno/plavno
+```
+
+The formula appears after the first stable release with macOS archives and includes
+both service helpers. Releases v0.3.0 and earlier have no macOS archives; until the
+first new release, build from source or use the CI archives instead.
+
 Download a prebuilt archive from [GitHub Releases](https://github.com/gmelikov/plavno/releases).
 Each archive includes `plavno`, `plavno-spotify`, and `plavno-youtube`, plus this
 README and the license. Rust and a C/C++ toolchain are not required to run them.
