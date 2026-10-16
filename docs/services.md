@@ -86,7 +86,11 @@ Token or Netscape `cookies` may be needed for account access.
 
 ## Spotify and YouTube Music
 
-Build only the helper you need. These dependencies do not affect normal player edits.
+Release archives include both helpers. Put all three executables on PATH; no
+helper build is needed when using those archives.
+
+For a source checkout or a Cargo installation, build only the helper you need.
+These dependencies do not affect normal player edits.
 
 ```sh
 cargo build --locked --release --manifest-path adapters/spotify/Cargo.toml --target-dir target/spotify

@@ -37,17 +37,25 @@ gh workflow run release.yml --ref distribution-ci -f ref=distribution-ci -f publ
 After merging the workflow, use `--ref master`; `-f ref=BRANCH_OR_SHA` selects
 the code to build. Manual runs default to `publish=false`.
 
-We keep the existing workflow rather than adopting cargo-dist for this scope.
-Cargo-dist supports multiple Cargo projects and Homebrew generation, but bundling
-our three independently versioned projects together still needs configuration,
-and WinGet generation is not currently supported. With Linux installers excluded,
-native builds, archive checks, and publishing fit directly in the current workflow.
-Reconsider cargo-dist when adding generated installers or automatic Homebrew
-publishing. See its [workspace support](https://axodotdev.github.io/cargo-dist/book/workspaces/structure.html)
-and [installer support](https://axodotdev.github.io/cargo-dist/book/installers/index.html).
+We keep the existing workflow for native builds, archive checks, and publishing.
+Linux distribution uses archives with documented prerequisites; no Linux installer
+is needed. WinGet is deferred. A Homebrew tap is the next distribution channel;
+this workflow does not create or update that separate repository.
 
-Homebrew tap and WinGet publication are separate from these binary releases;
-this workflow does not create package-manager repositories or submit manifests.
+We evaluated cargo-dist 0.33.0 with `dist plan` in a separate checkout. Importing
+the three Cargo projects normally selects only the player for tag `v0.3.0`, since
+the helpers are independently versioned `0.1.0` applications. A generic package
+declaring all three binaries produces the desired five archive plans and a
+Homebrew formula. This is supported, but needs a custom build command and a
+distribution version kept in sync with Cargo.toml; ABI and protocol smoke checks
+still need our own steps. The plan was evaluated without compiling or publishing.
+
+Cargo-dist's main benefit for us would be generated Homebrew formulae and automatic
+tap updates. Reconsider it when implementing that automation. For now, the existing
+workflow covers the archive distribution scope without another release tool.
+See [multi-package behavior](https://axodotdev.github.io/cargo-dist/book/workspaces/workspace-guide.html),
+[custom builds](https://axodotdev.github.io/cargo-dist/book/custom-builds.html), and
+[Homebrew support](https://axodotdev.github.io/cargo-dist/book/installers/homebrew.html).
 
 ## Trusted Publishing
 
