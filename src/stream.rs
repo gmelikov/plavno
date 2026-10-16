@@ -14,6 +14,7 @@ pub enum Failure {
     MissingFfmpeg,
     Http(u16),
     Timeout,
+    Connection,
     Tls,
     InvalidAudio,
     Failed,
@@ -25,6 +26,7 @@ impl fmt::Display for Failure {
             Self::MissingFfmpeg => f.write_str("ffmpeg not found; install it or set PLAVNO_FFMPEG"),
             Self::Http(status) => write!(f, "Audio CDN returned HTTP {status}"),
             Self::Timeout => f.write_str("Audio download timed out"),
+            Self::Connection => f.write_str("Audio CDN connection failed"),
             Self::Tls => f.write_str("Audio download failed: TLS connection error"),
             Self::InvalidAudio => f.write_str("ffmpeg could not recognize the audio stream"),
             Self::Failed => {
@@ -62,6 +64,18 @@ fn conversion_failure(stderr: &str) -> Failure {
     let lower = stderr.to_ascii_lowercase();
     if lower.contains("timed out") {
         Failure::Timeout
+    } else if [
+        "connection refused",
+        "network is unreachable",
+        "no route to host",
+        "failed to resolve hostname",
+        "name or service not known",
+        "temporary failure in name resolution",
+    ]
+    .iter()
+    .any(|message| lower.contains(message))
+    {
+        Failure::Connection
     } else if lower.contains("[tls ")
         || lower.contains("tls handshake")
         || lower.contains("certificate")
@@ -109,20 +123,26 @@ fn convert() -> Result<()> {
     io::stdin().lock().take(1024 * 1024).read_line(&mut line)?;
     let request: Value =
         serde_json::from_str(&line).map_err(|_| anyhow::anyhow!("Invalid stream request"))?;
-    let list = playlist(request["url"].as_str().context("Missing stream URL")?)?;
+    let url = request["url"].as_str().context("Missing stream URL")?;
+    let list = playlist(url)?;
+    let direct = request["direct"].as_bool() == Some(true);
     let program = std::env::var_os("PLAVNO_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
-    let mut child = Command::new(program)
-        .args([
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
+    let mut command = Command::new(program);
+    command.args(["-nostdin", "-hide_banner", "-loglevel", "error"]);
+    if direct {
+        command.args(["-protocol_whitelist", "pipe"]);
+    } else {
+        command.args([
             "-protocol_whitelist",
             "pipe,http,https,tcp,tls,crypto,data",
             "-f",
             "concat",
             "-safe",
             "0",
+        ]);
+    }
+    let mut child = command
+        .args([
             "-i",
             "pipe:0",
             "-vn",
@@ -141,14 +161,37 @@ fn convert() -> Result<()> {
         .map_err(|_| Failure::MissingFfmpeg)?;
     let stderr = child.stderr.take().unwrap();
     let diagnostics = std::thread::spawn(move || conversion_failure(&read_diagnostics(stderr)));
-    if let Err(error) = child.stdin.take().unwrap().write_all(list.as_bytes()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = diagnostics.join();
-        return Err(error).context("Cannot start audio conversion");
-    }
+    let mut stdin = child.stdin.take().unwrap();
+    let download = if direct {
+        let url = url.to_owned();
+        Some(std::thread::spawn(move || {
+            io::copy(&mut crate::audio::http_stream(url), &mut stdin)
+        }))
+    } else {
+        if let Err(error) = stdin.write_all(list.as_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = diagnostics.join();
+            return Err(error).context("Cannot start audio conversion");
+        }
+        drop(stdin);
+        None
+    };
     let status = child.wait()?;
     let failure = diagnostics.join().unwrap_or(Failure::Failed);
+    if let Some(download) = download
+        && let Err(error) = download
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("Audio downloader stopped")))
+        && error.kind() != io::ErrorKind::BrokenPipe
+    {
+        return Err(error
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<Failure>())
+            .copied()
+            .unwrap_or(Failure::Failed)
+            .into());
+    }
     if !status.success() {
         return Err(failure.into());
     }

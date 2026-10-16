@@ -6,7 +6,7 @@ use plavno_platform::process::Process as Child;
 use rodio::OutputStreamBuilder;
 use rodio::{Decoder, OutputStream, Sink, Source, mixer::Mixer};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs::File,
     io::{self, BufReader, Read, Seek, SeekFrom, Write},
     process::{Command, Stdio},
@@ -285,6 +285,7 @@ const HTTP_SEEK_CHUNK: usize = 16 * 1024;
 struct HttpReader {
     http: ureq::Agent,
     url: String,
+    fallbacks: VecDeque<String>,
     chunk: io::Cursor<Vec<u8>>,
     downloaded: u64,
     total: Option<u64>,
@@ -297,6 +298,7 @@ impl HttpReader {
     fn new(url: String, key: Option<[u8; 16]>) -> Self {
         Self {
             http: yandex_http(),
+            fallbacks: crate::backend::web::youtube_fallbacks(&url).into(),
             url,
             chunk: io::Cursor::new(Vec::new()),
             downloaded: 0,
@@ -308,8 +310,44 @@ impl HttpReader {
     }
 }
 
-impl Read for HttpReader {
-    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+impl HttpReader {
+    fn request_error(&self, error: ureq::Error) -> io::Error {
+        use crate::stream::Failure;
+        let failure = match &error {
+            ureq::Error::Timeout(_) => Failure::Timeout,
+            ureq::Error::StatusCode(status) => Failure::Http(*status),
+            ureq::Error::Rustls(_) | ureq::Error::Tls(_) => Failure::Tls,
+            ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => Failure::Connection,
+            ureq::Error::Io(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionRefused
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::NetworkUnreachable
+                        | io::ErrorKind::HostUnreachable
+                ) =>
+            {
+                Failure::Connection
+            }
+            _ => return io::Error::other(network_error_at(&self.url, error)),
+        };
+        io::Error::new(
+            if matches!(
+                failure,
+                Failure::Timeout | Failure::Connection | Failure::Tls
+            ) {
+                io::ErrorKind::ConnectionAborted
+            } else {
+                io::ErrorKind::Other
+            },
+            failure,
+        )
+    }
+
+    fn read_current(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         if bytes.is_empty() {
             return Ok(0);
         }
@@ -329,7 +367,7 @@ impl Read for HttpReader {
                     ),
                 )
                 .call()
-                .map_err(|error| io::Error::other(network_error_at(&self.url, error)))?;
+                .map_err(|error| self.request_error(error))?;
             let mut expected_length = None;
             match response.status().as_u16() {
                 206 => {
@@ -375,7 +413,7 @@ impl Read for HttpReader {
                 .with_config()
                 .limit(HTTP_CHUNK as u64 + 1)
                 .read_to_vec()
-                .map_err(|error| io::Error::other(network_error_at(&self.url, error)))?;
+                .map_err(|error| self.request_error(error))?;
             if data.len() > HTTP_CHUNK {
                 return Err(io::Error::other(
                     "The server does not support bounded HTTP ranges",
@@ -407,6 +445,32 @@ impl Read for HttpReader {
         }
         self.chunk.read(bytes)
     }
+}
+
+impl Read for HttpReader {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match self.read_current(bytes) {
+                Err(error)
+                    if self.downloaded == 0 && error.kind() == io::ErrorKind::ConnectionAborted =>
+                {
+                    if let Some(next) = self.fallbacks.pop_front() {
+                        self.url = next;
+                        self.total = None;
+                    } else {
+                        return Err(error);
+                    }
+                }
+                result => return result,
+            }
+        }
+    }
+}
+
+pub fn http_stream(url: String) -> impl Read + Send {
+    let mut reader = HttpReader::new(url, None);
+    reader.next_chunk_size = HTTP_SEEK_CHUNK;
+    reader
 }
 
 impl Seek for HttpReader {
@@ -1130,6 +1194,88 @@ fn prepare_segment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn failing_http_server(status: Option<u16>) -> (String, std::thread::JoinHandle<()>) {
+        use std::{io::BufRead, net::TcpListener};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/audio", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                assert!(!line.is_empty());
+            }
+            if let Some(status) = status {
+                write!(socket,"HTTP/1.1 {status} Error\r\nContent-Length: 0\r\nRetry-After: 120\r\nConnection: close\r\n\r\n").unwrap();
+            } else {
+                write!(socket,"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-1/2\r\nContent-Length: 2\r\nConnection: close\r\n\r\n").unwrap();
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+        (url, worker)
+    }
+
+    #[test]
+    fn initial_http_timeout_uses_backup_and_cached_seeks_make_no_more_requests() {
+        let data = vec![0x42; 65536];
+        let (backup, stop, server) = range_server(data.clone());
+        let (primary, failed) = failing_http_server(None);
+        let mut reader = HttpReader::new(primary, None);
+        reader.fallbacks = [backup].into();
+        reader.http = ureq::Agent::config_builder()
+            .timeout_recv_body(Some(Duration::from_millis(50)))
+            .build()
+            .into();
+        let mut actual = Vec::new();
+        reader.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, data);
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        let mut cached = [0; 16];
+        reader.read_exact(&mut cached).unwrap();
+        assert_eq!(cached, data[..16]);
+        stop.send(()).unwrap();
+        assert_eq!(server.join().unwrap(), [(0, data.len())]);
+        failed.join().unwrap();
+    }
+
+    #[test]
+    fn http_denials_rate_limits_and_failures_after_audio_do_not_use_backups() {
+        use std::net::TcpListener;
+        let backup = TcpListener::bind("127.0.0.1:0").unwrap();
+        backup.set_nonblocking(true).unwrap();
+        let backup_url = format!("http://{}/audio", backup.local_addr().unwrap());
+        for status in [403, 429] {
+            let (primary, worker) = failing_http_server(Some(status));
+            let mut reader = HttpReader::new(primary, None);
+            reader.fallbacks = [backup_url.clone()].into();
+            assert!(reader.read(&mut [0; 16]).is_err());
+            worker.join().unwrap();
+            assert_eq!(
+                backup.accept().unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+        let (url, stop, server) = range_server(vec![0x42; HTTP_CHUNK + 1]);
+        let mut reader = HttpReader::new(url, None);
+        reader.fallbacks = [backup_url].into();
+        reader.read_exact(&mut [0; 1]).unwrap();
+        stop.send(()).unwrap();
+        assert_eq!(server.join().unwrap(), [(0, HTTP_CHUNK)]);
+        reader.seek(SeekFrom::Start(HTTP_CHUNK as u64)).unwrap();
+        assert!(reader.read(&mut [0; 1]).is_err());
+        assert_eq!(
+            backup.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
 
     #[test]
     fn scrub_grains_are_bounded_reverse_the_pcm_and_fade_their_edges() {

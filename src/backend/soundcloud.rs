@@ -312,7 +312,7 @@ impl Backend for SoundCloud {
                     quality: "SoundCloud · original upload".into(),
                 });
             }
-            return web::transcode(url.into(), "SoundCloud · original upload".into());
+            return web::transcode(url.into(), "SoundCloud · original upload".into(), false);
         }
         let mut formats: Vec<_> = info["media"]["transcodings"]
             .as_array()
@@ -369,7 +369,7 @@ impl Backend for SoundCloud {
                     quality,
                 });
             }
-            return web::transcode(url.into(), quality);
+            return web::transcode(url.into(), quality, false);
         }
         anyhow::bail!("No playable full SoundCloud audio stream")
     }

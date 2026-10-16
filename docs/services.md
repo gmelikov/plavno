@@ -132,6 +132,11 @@ Both helpers select supported full audio at the best available quality.
 YouTube Opus/WebM streams require ffmpeg on PATH, or `PLAVNO_FFMPEG` pointing to
 its executable. Playback errors distinguish conversion failures from CDN HTTP
 errors, timeouts, and TLS failures without displaying signed stream URLs.
+YouTube audio is downloaded in bounded HTTP ranges and piped to ffmpeg for
+decoding; this avoids CDN rejection of ffmpeg's open-ended range requests.
+If a YouTube CDN connection fails before audio arrives, plavno tries up to two
+backup hosts advertised in the same stream URL, without probes or extra metadata
+requests. HTTP errors, including 403 and 429, do not trigger this fallback.
 
 ## Diagnostics
 

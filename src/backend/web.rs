@@ -92,14 +92,65 @@ pub fn text(value: &str) -> String {
     html_escape::decode_html_entities(&stripped).into_owned()
 }
 
-pub fn transcode(url: String, quality: String) -> Result<Input> {
+pub fn transcode(url: String, quality: String, direct: bool) -> Result<Input> {
     ensure!(url.starts_with("https://"), "Insecure audio stream URL");
     Ok(Input::Pipe {
         program: std::env::current_exe()?,
         args: vec!["--stream-audio".into()],
-        request: json!({"url":url}),
+        request: json!({"url":url,"direct":direct}),
         quality: format!("{quality} · FLAC transport"),
     })
+}
+
+pub fn youtube_fallbacks(address: &str) -> Vec<String> {
+    let Ok(url) = url::Url::parse(address) else {
+        return vec![];
+    };
+    let host =
+        regex_lite::Regex::new(r"^(rr?)([0-9]+)---(sn-[a-zA-Z0-9-]+)\.googlevideo\.com$").unwrap();
+    let Some(parts) = url
+        .host_str()
+        .and_then(|host_name| host.captures(host_name))
+    else {
+        return vec![];
+    };
+    if url.scheme() != "https" || url.port().is_some() || url.path() != "/videoplayback" {
+        return vec![];
+    }
+    let parameters: std::collections::HashMap<_, _> = url.query_pairs().collect();
+    let Some(nodes) = parameters.get("mn") else {
+        return vec![];
+    };
+    let server = parameters
+        .get("fvip")
+        .map_or(&parts[2], |value| value.as_ref());
+    if server.is_empty() || server.len() > 3 || !server.bytes().all(|b| b.is_ascii_digit()) {
+        return vec![];
+    }
+    let node = regex_lite::Regex::new(r"^sn-[a-zA-Z0-9-]+$").unwrap();
+    let mut fallbacks = Vec::new();
+    for candidate in nodes
+        .split(',')
+        .filter(|candidate| *candidate != &parts[3] && node.is_match(candidate))
+    {
+        let mut fallback = url.clone();
+        if fallback
+            .set_host(Some(&format!(
+                "{}{server}---{candidate}.googlevideo.com",
+                &parts[1]
+            )))
+            .is_ok()
+        {
+            let fallback = fallback.to_string();
+            if !fallbacks.contains(&fallback) {
+                fallbacks.push(fallback);
+                if fallbacks.len() == 2 {
+                    break;
+                }
+            }
+        }
+    }
+    fallbacks
 }
 
 #[derive(Default)]
@@ -240,6 +291,34 @@ impl Cookies {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn youtube_backups_use_signed_routing_nodes_without_changing_the_query() {
+        let url = "https://rr4---sn-primary.googlevideo.com/videoplayback?mn=sn-primary,sn-backup,sn-backup,sn-third,sn-fourth&fvip=2&sig=secret%2Bsignature&lsig=private&range=0-1023";
+        let backups = youtube_fallbacks(url);
+        assert_eq!(backups.len(), 2);
+        let original = url::Url::parse(url).unwrap();
+        for (backup, host) in backups.iter().zip([
+            "rr2---sn-backup.googlevideo.com",
+            "rr2---sn-third.googlevideo.com",
+        ]) {
+            let parsed = url::Url::parse(backup).unwrap();
+            assert_eq!(parsed.host_str(), Some(host));
+            assert_eq!(parsed.query(), original.query());
+            assert_eq!(parsed.path(), original.path());
+        }
+        for invalid in [
+            "https://rr4---sn-primary.googlevideo.com.evil.test/videoplayback?mn=sn-primary,sn-backup",
+            "https://example.com/videoplayback?mn=sn-primary,sn-backup",
+            "http://rr4---sn-primary.googlevideo.com/videoplayback?mn=sn-primary,sn-backup",
+            "https://rr4---sn-primary.googlevideo.com/other?mn=sn-primary,sn-backup",
+            "https://rr4---sn-primary.googlevideo.com/videoplayback?mn=sn-primary,sn-backup.evil.test",
+            "https://rr4---sn-primary.googlevideo.com/videoplayback?mn=sn-primary,sn-backup&fvip=bad",
+            "https://rr4---sn-primary.googlevideo.com/videoplayback?mn=sn-primary,sn-backup%2Fbad",
+        ] {
+            assert!(youtube_fallbacks(invalid).is_empty());
+        }
+    }
 
     #[test]
     fn manual_cookie_header_is_scoped_and_rejects_header_injection() {

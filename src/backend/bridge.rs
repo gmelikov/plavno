@@ -193,7 +193,7 @@ impl Backend for Bridge {
                 .unwrap_or("YouTube Music audio")
                 .to_owned();
             if value["transcode"].as_bool() == Some(true) {
-                return super::web::transcode(url, quality);
+                return super::web::transcode(url, quality, true);
             }
             Ok(Input::Http {
                 url,

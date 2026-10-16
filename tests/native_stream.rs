@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -17,6 +17,7 @@ use std::{
 
 struct Server {
     url: String,
+    ranges: Arc<Mutex<Vec<(usize, usize)>>>,
     release: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
@@ -28,6 +29,8 @@ impl Server {
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let files = Arc::new(files);
+        let ranges = Arc::new(Mutex::new(Vec::new()));
+        let requested = ranges.clone();
         let release = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
         let gate = release.clone();
@@ -38,8 +41,9 @@ impl Server {
                 match listener.accept() {
                     Ok((socket, _)) => {
                         let (files, gate, stop) = (files.clone(), gate.clone(), stopped.clone());
+                        let ranges = requested.clone();
                         requests.push(thread::spawn(move || {
-                            serve(socket, &files, &gate, &stop, hls)
+                            serve(socket, &files, &gate, &stop, hls, &ranges)
                         }));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -54,6 +58,7 @@ impl Server {
         });
         Self {
             url,
+            ranges,
             release,
             stop,
             worker: Some(worker),
@@ -75,6 +80,7 @@ fn serve(
     gate: &AtomicBool,
     stop: &AtomicBool,
     hls: bool,
+    ranges: &Mutex<Vec<(usize, usize)>>,
 ) {
     socket.set_nonblocking(false).unwrap();
     socket
@@ -110,6 +116,15 @@ fn serve(
         let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
         return;
     };
+    if path.ends_with("webm")
+        && range
+            .as_ref()
+            .and_then(|r| r.split_once('-'))
+            .is_none_or(|(_, end)| end.is_empty())
+    {
+        let _ = socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+        return;
+    }
     let (start, end) =
         range
             .as_ref()
@@ -122,6 +137,9 @@ fn serve(
                         .min(bytes.len() - 1),
                 )
             });
+    if path.ends_with("webm") {
+        ranges.lock().unwrap().push((start, end + 1));
+    }
     let code = if range.is_some() {
         "206 Partial Content"
     } else {
@@ -248,6 +266,7 @@ fn check(hls: bool, encrypted: bool, opus: bool) {
     } else {
         files.insert("audio.flac".into(), fs::read(&fixture).unwrap());
     }
+    let opus_size = files.get("audio.webm").map(Vec::len);
     let server = Server::new(files, hls);
     let mut process = Process(
         plavno_platform::process::Process::spawn(
@@ -260,7 +279,7 @@ fn check(hls: bool, encrypted: bool, opus: bool) {
         )
         .unwrap(),
     );
-    let request = serde_json::json!({"url":format!("{}/{}",server.url,if hls {"list.m3u8"} else if opus {"audio.webm"} else {"audio.flac"})});
+    let request = serde_json::json!({"url":format!("{}/{}",server.url,if hls {"list.m3u8"} else if opus {"audio.webm"} else {"audio.flac"}),"direct":opus});
     writeln!(process.0.stdin.take().unwrap(), "{request}").unwrap();
     let mut stdout = process.0.stdout.take().unwrap();
     let (ready, started) = mpsc::channel();
@@ -309,6 +328,17 @@ fn check(hls: bool, encrypted: bool, opus: bool) {
     if hls || opus {
         assert!(samples < 13 * rate);
     }
+    if let Some(size) = opus_size {
+        let mut position = 0;
+        for &(start, end) in server.ranges.lock().unwrap().iter() {
+            assert_eq!(
+                start, position,
+                "Audio was downloaded more than once or skipped"
+            );
+            position = end;
+        }
+        assert_eq!(position, size);
+    }
     assert_eq!(
         fs::read_dir(&runtime).unwrap().count(),
         0,
@@ -344,23 +374,25 @@ fn native_opus_webm_audio_is_converted_to_decodable_flac_before_full_download() 
 #[ignore = "Requires ffmpeg on PATH or PLAVNO_FFMPEG"]
 fn native_conversion_reports_http_errors_without_signed_urls() {
     let server = Server::new(HashMap::new(), false);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_plavno"))
-        .arg("--stream-audio")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    writeln!(
+    for direct in [false, true] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_plavno"))
+            .arg("--stream-audio")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(
         child.stdin.take().unwrap(),
         "{}",
-        serde_json::json!({"url":format!("{}/missing?secret=private-token",server.url)})
+        serde_json::json!({"url":format!("{}/missing?secret=private-token",server.url),"direct":direct})
     )
     .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("Audio CDN returned HTTP 404"), "{stderr}");
-    assert!(!stderr.contains("private-token"), "{stderr}");
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("Audio CDN returned HTTP 404"), "{stderr}");
+        assert!(!stderr.contains("private-token"), "{stderr}");
+    }
 }
