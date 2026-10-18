@@ -99,13 +99,19 @@ pub enum PlaybackMode {
     #[default]
     MyVibe,
     FavoritesShuffle,
+    FavoritesNewest,
 }
 
 impl PlaybackMode {
+    pub fn is_favorites(self) -> bool {
+        matches!(self, Self::FavoritesShuffle | Self::FavoritesNewest)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::MyVibe => "My Vibe",
             Self::FavoritesShuffle => "Favorites Shuffle",
+            Self::FavoritesNewest => "Favorites · Newest first",
         }
     }
 
@@ -113,6 +119,7 @@ impl PlaybackMode {
         match self {
             Self::MyVibe => "w",
             Self::FavoritesShuffle => "f",
+            Self::FavoritesNewest => "Shift+F",
         }
     }
 }
@@ -145,6 +152,7 @@ impl WaveStyle {
             Self::Balanced => "Personal recommendations without mood filters",
             Self::Energetic => "Active tracks",
             Self::Work if source == "yandex" => "Calm ambient without vocals",
+            Self::Work if source == "ytmusic" => "Focus playlists from YouTube Music",
             Self::Work => "Calm instrumental tracks",
         }
     }
@@ -200,7 +208,7 @@ pub trait Backend: Send {
     fn start_mode(&mut self, mode: PlaybackMode) -> Result<Vec<Track>> {
         anyhow::ensure!(
             mode == PlaybackMode::MyVibe,
-            "This source does not support Favorites Shuffle"
+            "This source does not support favorites playback"
         );
         self.start()
     }

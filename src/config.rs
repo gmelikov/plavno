@@ -78,7 +78,7 @@ pub fn backends_with_overrides(
             available: ready,
             favorites: key == "vk" || youtube_favorites,
             favorites_shuffle: key == "vk" || youtube_favorites,
-            wave_styles: key == "vk",
+            wave_styles: key == "vk" || (youtube_favorites && seed.is_none()),
             allow_repeats: false,
             status: if seed.is_some() && ready {
                 "Session radio override".into()

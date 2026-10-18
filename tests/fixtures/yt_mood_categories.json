@@ -1,0 +1,55 @@
+{
+  "items": [
+    {
+      "musicNavigationButtonRenderer": {
+        "buttonText": {
+          "runs": [
+            {
+              "text": "Chill"
+            }
+          ]
+        },
+        "clickCommand": {
+          "browseEndpoint": {
+            "browseId": "FEmusic_moods_and_genres_category",
+            "params": "ggMPOg1uX1JOQWZFeDByc2Jm"
+          }
+        }
+      }
+    },
+    {
+      "musicNavigationButtonRenderer": {
+        "buttonText": {
+          "runs": [
+            {
+              "text": "Energize"
+            }
+          ]
+        },
+        "clickCommand": {
+          "browseEndpoint": {
+            "browseId": "FEmusic_moods_and_genres_category",
+            "params": "ggMPOg1uX2lRZUZiMnNrQnJW"
+          }
+        }
+      }
+    },
+    {
+      "musicNavigationButtonRenderer": {
+        "buttonText": {
+          "runs": [
+            {
+              "text": "Focus"
+            }
+          ]
+        },
+        "clickCommand": {
+          "browseEndpoint": {
+            "browseId": "FEmusic_moods_and_genres_category",
+            "params": "ggMPOg1uX0NvNGNhWThMYWRh"
+          }
+        }
+      }
+    }
+  ]
+}

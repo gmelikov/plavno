@@ -27,6 +27,7 @@ mod sixel;
 mod source_view;
 mod spring;
 mod stream;
+mod terminal_input;
 mod text_selection;
 mod tui;
 mod visualization;
@@ -78,7 +79,7 @@ fn run() -> Result<()> {
         .is_some_and(|arg| arg == "--help" || arg == "-h")
     {
         println!(
-            "plavno {VERSION} — a lightweight music TUI\n\n  plavno --version              show version\n  plavno                        play the first connected service\n  plavno --source SOURCE        yandex / soundcloud / spotify / vk / ytmusic / local / mixed\n  plavno --seed ID_OR_URL       override track radio for this run (--source required)\n  plavno --favorites            shuffle favorites (Yandex; --source vk: My Music; ytmusic: Liked Music)\n  plavno --no-wave              start with visualization hidden\n  plavno --dance                show the wave and dancing silhouette\n  plavno --dance-style STYLE    auto / flow / groove / pulse / house / hiphop / rave\n  plavno --renderer MODE        dancer output: auto / braille / sixel\n  plavno --dance-skin SKIN       sixel appearance: detailed (default) / silhouette\n  plavno --sixel-update MODE    diff (default) / full\n  plavno login [SOURCE]         connect a service (default: yandex; SoundCloud/VK: browser)\n  plavno login yandex           paste a Yandex Music OAuth token\n  plavno login SOURCE --manual  paste a JSON profile without browser automation\n  plavno diagnose yandex       check API access and audio CDN connectivity\n  plavno diagnose vk           inspect the VK response layout (no session values)\n  plavno sources                list service configuration\n  plavno local DIRECTORY        save the local music directory (recursive shuffle)\n  plavno --directory DIRECTORY  use a local directory for this run\n  plavno --file FILE            play a local file\n\nSpace pause · x stop · p/n tracks · ←/→ ±5s · Shift+←/→ ±30s\nClick controls · drag progress · scroll bar to seek, Speed to change rate, elsewhere volume · h or / history\nHistory: type to search · ↑/↓ select · Enter play · Esc back\ns sources · m Wave Shuffle · w restart wave · f Favorites Shuffle\ng Flow settings · v toggle visualization · b wave/dance · l ♥/♡ favorites · d dislike · u undo dislike\n+/- volume · [/] playback speed · q quit"
+            "plavno {VERSION} — a lightweight music TUI\n\n  plavno --version              show version\n  plavno                        play the first connected service\n  plavno --source SOURCE        yandex / soundcloud / spotify / vk / ytmusic / local / mixed\n  plavno --seed ID_OR_URL       override track radio for this run (--source required)\n  plavno --favorites            shuffle favorites (Yandex; --source vk: My Music; ytmusic: Liked Music)\n  plavno --favorites-newest     play favorites from newest to oldest\n  plavno --no-wave              start with visualization hidden\n  plavno --dance                show the wave and dancing silhouette\n  plavno --dance-style STYLE    auto / flow / groove / pulse / house / hiphop / rave\n  plavno --renderer MODE        dancer output: auto / braille / sixel\n  plavno --dance-skin SKIN       sixel appearance: detailed (default) / silhouette\n  plavno --sixel-update MODE    diff (default) / full\n  plavno login [SOURCE]         connect a service (default: yandex; SoundCloud/VK: browser)\n  plavno login yandex           paste a Yandex Music OAuth token\n  plavno login SOURCE --manual  paste a JSON profile without browser automation\n  plavno diagnose yandex       check API access and audio CDN connectivity\n  plavno diagnose vk           inspect the VK response layout (no session values)\n  plavno sources                list service configuration\n  plavno local DIRECTORY        save the local music directory (recursive shuffle)\n  plavno --directory DIRECTORY  use a local directory for this run\n  plavno --file FILE            play a local file\n\nSpace pause · x stop · p/n tracks · ←/→ ±5s · Shift+←/→ ±30s\nClick controls · drag progress · scroll bar to seek, Speed to change rate, elsewhere volume · h or / history\nHistory: type to search · ↑/↓ select · Enter play · Esc back\ns sources · m Wave Shuffle · w restart wave · f Favorites Shuffle · Shift+F newest favorites\ng Flow settings · v toggle visualization · b wave/dance · l ♥/♡ favorites · d dislike · u undo dislike\n+/- volume · [/] playback speed · q quit"
         );
         return Ok(());
     }
@@ -130,7 +131,7 @@ fn run() -> Result<()> {
         );
         return Ok(());
     }
-    let mut favorites = false;
+    let mut favorites = None;
     let mut no_wave = false;
     let mut visual_mode = visualization::Mode::Wave;
     let mut dance_style = dance_motion::Style::Auto;
@@ -144,7 +145,9 @@ fn run() -> Result<()> {
     let mut arguments = args.iter();
     while let Some(arg) = arguments.next() {
         if arg == "--favorites" {
-            favorites = true;
+            favorites = Some(backend::PlaybackMode::FavoritesShuffle);
+        } else if arg == "--favorites-newest" {
+            favorites = Some(backend::PlaybackMode::FavoritesNewest);
         } else if arg == "--no-wave" {
             no_wave = true;
         } else if arg == "--dance" {
@@ -207,7 +210,10 @@ fn run() -> Result<()> {
         }
     }
     let seed = if let Some(seed) = seed {
-        anyhow::ensure!(!favorites, "--seed cannot be combined with --favorites");
+        anyhow::ensure!(
+            favorites.is_none(),
+            "--seed cannot be combined with --favorites or --favorites-newest"
+        );
         Some((
             selected.ok_or_else(|| {
                 anyhow::anyhow!("--seed requires --source ytmusic, soundcloud or spotify")
@@ -219,15 +225,15 @@ fn run() -> Result<()> {
     };
     let backend: Box<dyn backend::Backend> = if let Some(file) = file {
         anyhow::ensure!(
-            selected.is_none() && !favorites && directory.is_none() && seed.is_none(),
-            "--file cannot be combined with --source, --directory, --seed or --favorites"
+            selected.is_none() && favorites.is_none() && directory.is_none() && seed.is_none(),
+            "--file cannot be combined with --source, --directory, --seed, --favorites or --favorites-newest"
         );
         Box::new(backend::Local(file))
     } else {
         if directory.is_some() && selected.is_none() {
             selected = Some("local");
         }
-        if favorites && selected.is_none() {
+        if favorites.is_some() && selected.is_none() {
             selected = Some("yandex");
         }
         let (backends, services) = config::backends_with_overrides(directory, seed)?;
@@ -241,8 +247,8 @@ fn run() -> Result<()> {
     #[cfg(windows)]
     let _media_runtime = windows_media::Runtime::new()?;
     let (mut engine, events, receiver) = engine::Engine::new(backend)?;
-    if favorites {
-        engine.mode = backend::PlaybackMode::FavoritesShuffle;
+    if let Some(mode) = favorites {
+        engine.mode = mode;
     }
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     let media_controls = match MediaControls::new(&engine, events.clone()) {

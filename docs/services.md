@@ -14,7 +14,9 @@ The player requests lossless and falls back to the best available supported
 format; the TUI shows the actual quality.
 
 Use `plavno --source yandex` for My Vibe or `plavno --source yandex --favorites`
-for library shuffle. Yandex Music is also available in the Sources menu and Wave Shuffle.
+for library shuffle. Use `Shift+F` or `--favorites-newest` to play favorites in
+order, starting with the most recently added track. Yandex Music is also
+available in the Sources menu and Wave Shuffle.
 
 For connection errors, run `plavno diagnose yandex`. It checks account access,
 favorites, stream resolution and a 1 KiB audio CDN download without playing
@@ -68,6 +70,7 @@ copy `access_token` from its payload, and add `"token":"COPIED_ACCESS_TOKEN"`
 to the profile. A copied token needs valid session cookies to renew;
 otherwise repeat manual setup when it expires.
 
+`Shift+F` (or `--favorites-newest`) plays **My Music** from newest to oldest.
 `f` shuffles tracks from **My Music**, including manually added tracks;
 `l` adds or removes the current track. `w` starts a new recommendation wave.
 
@@ -135,7 +138,7 @@ saved authentication, and lasts for the current process, including wave restarts
 and source switching. The connection profile is not changed. SoundCloud and
 YouTube Music can use a public seed without login; Spotify requires saved
 credentials and Premium. Select one of these sources explicitly; `--seed`
-cannot be combined with `--source mixed`, `--favorites`, or `--file`.
+cannot be combined with `--source mixed`, `--favorites`, `--favorites-newest`, or `--file`.
 Rebuild the Spotify helper when updating a source installation.
 
 With cookies alone, plavno reads YouTube Music home recommendations to choose a
@@ -146,6 +149,17 @@ changed, and later radio batches reuse the anchor without another home request.
 An empty music account needs recommendations or liked songs on music.youtube.com,
 or an explicit seed or playlist. A rejected session is reported as a sign-in
 error rather than an empty recommendation feed.
+
+With signed-in cookies and no `--seed` override, press `g` to select Flow just as
+on Yandex Music: Calm uses YouTube Music's Chill category, Energetic uses Energize,
+and Work uses Focus. These modes shuffle category playlists and read their tracks
+in bounded batches, without requiring a starting song or switching to unfiltered
+track radio. Focus does not guarantee instrumental music. Balanced restores the
+usual personal mix or configured seed/playlist. Favorites playback is unaffected.
+Category parameters are discovered from YouTube Music rather than hardcoded;
+the catalog and selected categories' playlist IDs stay in RAM for up to 30 minutes,
+scoped to the account. Restarts of a wave reuse that catalog; HTTP 429 cooldowns
+still survive application restarts. Missing categories are reported explicitly.
 
 yt-dlp fetches bounded flat playlist batches and resolves audio URLs only for
 tracks selected for playback or adjacent preloading. It does not download audio.
@@ -165,15 +179,17 @@ session, refresh the export. For multiple Google accounts, the optional profile
 field `"auth_user":"1"` selects the account index; the default is `"0"`. Legacy
 browser headers retain their `X-Goog-AuthUser` selection.
 
+Press `Shift+F`, or run `plavno --source ytmusic --favorites-newest`, to play
+Liked Music in its library order, newest additions first.
 Press `f`, or run `plavno --source ytmusic --favorites`, to shuffle YouTube Music's
 **Liked Music** (`LM`). This does not load YouTube's general Liked videos (`LL`).
 Music videos in Liked Music are included; podcast episodes and unavailable entries
-are skipped. The player loads paginated metadata into RAM and shuffles the whole
-collection, with a limit of 100,000 tracks. Audio still loads only for playback and
-adjacent preloading. Each new shuffle cycle refreshes the collection; `f` restarts
-it manually, and `w` returns to radio. A single selected service is required for
-Favorites Shuffle. Like states are cached in RAM, and changes appear only after
-YouTube accepts the request. No likes requests are retried automatically.
+are skipped. The player loads paginated metadata into RAM, with a limit of
+100,000 tracks. Shuffle mode randomizes the whole collection. Audio still loads
+only for playback and adjacent preloading. Each new pass refreshes the collection; `f` restarts
+shuffle, `Shift+F` restarts from the newest addition, and `w` returns to radio.
+A single selected service is required for favorites playback. Like states are
+cached in RAM, and changes appear only after YouTube accepts the request. No likes requests are retried automatically.
 
 YouTube Opus/WebM streams require ffmpeg on PATH, or `PLAVNO_FFMPEG` pointing to
 its executable. Playback errors distinguish conversion failures from CDN HTTP

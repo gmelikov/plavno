@@ -1,6 +1,7 @@
 mod likes;
+mod mood;
 
-use super::{Backend, Feedback, Input, RateLimited, Track, web};
+use super::{Backend, Feedback, Input, RateLimited, Track, WaveStyle, web};
 use anyhow::{Context, Result, ensure};
 use plavno_platform::process::Process;
 use serde_json::{Value, json};
@@ -23,6 +24,8 @@ pub struct YouTube {
     session: Option<Session>,
     enable_node: bool,
     api: ureq::Agent,
+    style: WaveStyle,
+    mood_catalog: Option<mood::Catalog>,
     #[cfg(test)]
     api_base: Option<String>,
 }
@@ -38,6 +41,8 @@ struct Session {
     liked: VecDeque<(String, bool)>,
     favorites: Option<VecDeque<Track>>,
     favorites_last: Option<String>,
+    favorites_newest: bool,
+    mood: Option<mood::Queue>,
 }
 
 fn temporary_path(kind: &str) -> Result<PathBuf> {
@@ -99,6 +104,8 @@ impl YouTube {
             seed: None,
             session: None,
             enable_node: true,
+            style: WaveStyle::default(),
+            mood_catalog: None,
             api: ureq::Agent::config_builder()
                 .http_status_as_error(false)
                 .max_redirects(0)
@@ -201,6 +208,8 @@ impl YouTube {
                 liked: VecDeque::new(),
                 favorites: None,
                 favorites_last: None,
+                favorites_newest: false,
+                mood: None,
             };
             if let Some(cookies) = cookies {
                 let cookies = web::Cookies::parse(&cookies)?.netscape();
@@ -289,6 +298,9 @@ impl YouTube {
     }
 
     fn wave(&mut self, history: &[String]) -> Result<Vec<Track>> {
+        if self.style != WaveStyle::Balanced {
+            return self.mood_batch(history);
+        }
         if self.session()?.personal && self.session()?.radio.is_none() {
             let anchor = self.personal_seed()?;
             self.session.as_mut().unwrap().radio = Some(anchor);
@@ -515,6 +527,17 @@ impl Backend for YouTube {
     }
     fn name(&self) -> &'static str {
         "YouTube Music"
+    }
+    fn supports_wave_styles(&self) -> bool {
+        self.seed.is_none() && Self::has_favorites_profile(&self.profile)
+    }
+    fn set_wave_style(&mut self, style: WaveStyle) -> Result<()> {
+        ensure!(
+            style == WaveStyle::Balanced || self.supports_wave_styles(),
+            "YouTube Flow requires saved cookies and no --seed override"
+        );
+        self.style = style;
+        Ok(())
     }
     fn supports_favorites(&self) -> bool {
         Self::has_favorites_profile(&self.profile)

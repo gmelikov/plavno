@@ -88,11 +88,11 @@ are not included in the archives. On macOS, use `brew install ffmpeg`.
 
 | Service | Source key | Stable | Playback | Connection |
 |---|---|:---:|---|---|
-| Yandex Music | `yandex` | 🟢 | My Vibe, favorites shuffle, flow presets | OAuth token; full tracks require account access / Yandex Plus |
+| Yandex Music | `yandex` | 🟢 | My Vibe, favorites (shuffle or newest first), flow presets | OAuth token; full tracks require account access / Yandex Plus |
 | VK Music | `vk` | 🟢 | Recommendations, My Music shuffle, flow presets | Installed Chrome/Chromium or manual session import |
 | SoundCloud | `soundcloud` | — | Track stations | Browser sign-in or a public seed track |
 | Spotify | `spotify` | — | Track radio | Optional Rust helper; Premium and OAuth |
-| YouTube Music | `ytmusic` | — | Home mixes, track radio and Liked Music shuffle | External yt-dlp; cookies or a public seed |
+| YouTube Music | `ytmusic` | — | Home mixes, mood playlists, track radio and Liked Music shuffle | External yt-dlp; cookies or a public seed |
 | Local music | `local` | — | Recursive directory shuffle | A local music directory |
 
 ### Yandex Music
@@ -156,6 +156,7 @@ See [service setup](docs/services.md) for profile examples and troubleshooting.
 plavno sources                         # List supported services and connection status
 plavno --source yandex                  # Yandex Music My Vibe
 plavno --source yandex --favorites      # Shuffle Yandex favorites
+plavno --source yandex --favorites-newest # Favorites, most recently added first
 plavno --source vk                      # VK recommendations
 plavno --source vk --favorites          # Shuffle VK My Music
 plavno --source mixed                   # Mix waves from connected services
@@ -170,7 +171,10 @@ plavno --no-wave                        # Start without visualization
 
 ## Controls
 
-Buttons display their hotkeys and support mouse clicks.
+Buttons display their hotkeys and support mouse clicks. Hold Shift to replace
+`f Favorites` with `F Newest first`. Windows uses native console key events;
+on Linux and macOS, modifier reporting requires the Kitty keyboard protocol
+(for example, foot, Ghostty, or iTerm2).
 
 | Key | Action |
 |---|---|
@@ -185,6 +189,7 @@ Buttons display their hotkeys and support mouse clicks.
 | h or / | History: type to search, ↑/↓ select, Enter play |
 | s / m | Choose a service / mix service waves |
 | w / f | New wave / library shuffle (VK: My Music) |
+| Shift+F | Favorites in order, most recently added first (Yandex, VK, YouTube Music) |
 | g | Flow: Calm, Balanced, Energetic, Work; choose with 1–4 or a click |
 | v | Toggle visualization |
 | b | Toggle a dancing silhouette over the wave; `--dance` starts with both |
@@ -225,6 +230,9 @@ to close.
 Flow changes recommendations. Work requests calm ambient without vocals on Yandex
 and calm instrumental tracks on VK. `w` returns from library shuffle to a new wave;
 VK filters recent tracks to avoid repeating the initial queue.
+With signed-in YouTube cookies and no `--seed`, Flow selects YouTube Music's Chill
+(Calm), Energize (Energetic), or Focus (Work) playlists. Focus can include vocals.
+Balanced returns to the usual personal mix or configured seed/playlist.
 Flow also works in Wave Shuffle: it changes supported sources, while other sources,
 including local music, keep playing their full libraries without mood filtering.
 

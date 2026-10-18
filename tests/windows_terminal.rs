@@ -172,6 +172,16 @@ fn conpty_plays_local_files_pauses_resizes_and_quits() {
     input.write_all(b" ").unwrap();
     input.flush().unwrap();
     wait_for("Paused");
+    wait_for("f Favorites");
+    // ConPTY Win32-input sequences encode VK, scan code, UTF-16, down, modifiers, repeat.
+    for scan in [42, 54] {
+        write!(input, "\x1b[16;{scan};0;1;16;1_").unwrap();
+        input.flush().unwrap();
+        wait_for("F Newest first");
+        write!(input, "\x1b[16;{scan};0;0;0;1_").unwrap();
+        input.flush().unwrap();
+        wait_for("f Favorites");
+    }
     unsafe {
         assert!(ResizePseudoConsole(console.0, COORD { X: 70, Y: 25 }) >= 0);
     }

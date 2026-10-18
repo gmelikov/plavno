@@ -21,6 +21,7 @@ pub struct Yandex {
     uid: Option<String>,
     favorites: Option<(HashSet<String>, Instant)>,
     shuffle: Option<FavoritesQueue>,
+    ordered_favorites: Vec<String>,
     style: WaveStyle,
     streams: Cache,
 }
@@ -30,6 +31,7 @@ struct FavoritesQueue {
     remaining: VecDeque<String>,
     last: Option<String>,
     fresh_cycle: bool,
+    newest_first: bool,
 }
 
 const FAVORITES_BATCH: usize = 32;
@@ -101,6 +103,7 @@ impl Yandex {
             uid: None,
             favorites: None,
             shuffle: None,
+            ordered_favorites: Vec::new(),
             style: WaveStyle::default(),
             streams: Cache::default(),
         }
@@ -334,8 +337,16 @@ impl Yandex {
         let tracks = value["library"]["tracks"]
             .as_array()
             .context("The API did not return the favorites list")?;
-        let ids: Result<HashSet<String>> = tracks
-            .iter()
+        let mut ordered: Vec<_> = tracks.iter().collect();
+        ordered.sort_by_cached_key(|track| {
+            std::cmp::Reverse(
+                track["timestamp"]
+                    .as_str()
+                    .and_then(|timestamp| OffsetDateTime::parse(timestamp, &Rfc3339).ok()),
+            )
+        });
+        let ids: Result<Vec<String>> = ordered
+            .into_iter()
             .map(|track| {
                 let id = match &track["id"] {
                     Value::String(id) => id.clone(),
@@ -349,19 +360,26 @@ impl Yandex {
                 Ok(id)
             })
             .collect();
-        self.favorites = Some((ids?, Instant::now()));
+        let mut seen = HashSet::new();
+        self.ordered_favorites = ids?
+            .into_iter()
+            .filter(|id| seen.insert(id.clone()))
+            .collect();
+        self.favorites = Some((seen, Instant::now()));
         Ok(())
     }
 
     fn refill_favorites(&mut self) -> Result<()> {
         self.refresh_favorites(true)?;
-        let mut ids: Vec<_> = self.favorites.as_ref().unwrap().0.iter().cloned().collect();
+        let mut ids = self.ordered_favorites.clone();
         ensure!(!ids.is_empty(), "No favorite tracks yet; like tracks first");
-        let mut random = BufReader::new(
-            plavno_platform::Random::new().context("Failed to open the random source")?,
-        );
         let queue = self.shuffle.as_mut().unwrap();
-        shuffle_favorites(&mut ids, queue.last.as_deref(), &mut random)?;
+        if !queue.newest_first {
+            let mut random = BufReader::new(
+                plavno_platform::Random::new().context("Failed to open the random source")?,
+            );
+            shuffle_favorites(&mut ids, queue.last.as_deref(), &mut random)?;
+        }
         queue.remaining = ids.into();
         queue.fresh_cycle = true;
         Ok(())
@@ -396,7 +414,8 @@ impl Yandex {
             let mut result: Vec<_> = ids.iter().filter_map(|id| tracks.remove(id)).collect();
             let queue = self.shuffle.as_mut().unwrap();
             queue.remaining.drain(..ids.len());
-            if queue.fresh_cycle
+            if !queue.newest_first
+                && queue.fresh_cycle
                 && result.first().map(|t| &t.id) == queue.last.as_ref()
                 && !result.is_empty()
             {
@@ -480,9 +499,12 @@ impl Backend for Yandex {
     fn start_mode(&mut self, mode: PlaybackMode) -> Result<Vec<Track>> {
         match mode {
             PlaybackMode::MyVibe => self.start(),
-            PlaybackMode::FavoritesShuffle => {
+            PlaybackMode::FavoritesShuffle | PlaybackMode::FavoritesNewest => {
                 self.session = None;
-                self.shuffle = Some(FavoritesQueue::default());
+                self.shuffle = Some(FavoritesQueue {
+                    newest_first: mode == PlaybackMode::FavoritesNewest,
+                    ..FavoritesQueue::default()
+                });
                 self.favorites_batch()
             }
         }
@@ -1458,6 +1480,63 @@ mod tests {
     }
 
     #[test]
+    fn favorites_newest_orders_by_added_time_across_batches_and_refreshes_each_pass() {
+        let mut entries: Vec<_> = (1..=37)
+            .map(|id| json!({"id": id, "timestamp": format!("2026-10-18T12:{id:02}:00Z")}))
+            .collect();
+        entries.rotate_left(13);
+        entries.push(entries[0].clone());
+        let (mut backend, server) = mock_api(vec![
+            ("GET /account/status", json!({"account":{"uid":12345}})),
+            (
+                "GET /users/12345/likes/tracks?if-modified-since-revision=0",
+                json!({"library":{"tracks":entries}}),
+            ),
+            ("POST /tracks", metadata((1..=37).filter(|id| *id != 4))),
+            ("POST /tracks", metadata((1..=37).filter(|id| *id != 4))),
+            (
+                "GET /users/12345/likes/tracks?if-modified-since-revision=0",
+                json!({"library":{"tracks":[
+                    {"id":2,"timestamp":"2026-10-18T12:00:00Z"},
+                    {"id":1,"timestamp":"2026-10-18T15:01:00+03:00"}
+                ]}}),
+            ),
+            ("POST /tracks", metadata(1..=2)),
+        ]);
+        let mut tracks = backend.start_mode(PlaybackMode::FavoritesNewest).unwrap();
+        assert_eq!(tracks[0].id, "37");
+        assert_eq!(backend.favorite_state(&tracks[0]).unwrap(), Some(true));
+        tracks.extend(backend.more(&[]).unwrap());
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| track.id.clone())
+                .collect::<Vec<_>>(),
+            (1..=37)
+                .rev()
+                .filter(|id| ![3, 4].contains(id))
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            backend
+                .more(&[])
+                .unwrap()
+                .iter()
+                .map(|track| track.id.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "2"]
+        );
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 6);
+        assert_eq!(
+            requested_ids(&requests[2]),
+            (6..=37).rev().map(|id| id.to_string()).collect::<Vec<_>>()
+        );
+        assert_eq!(requested_ids(&requests[3]), ["5", "4", "3", "2", "1"]);
+    }
+
+    #[test]
     fn favorites_shuffle_reports_empty_library_and_all_unavailable_tracks() {
         for empty in [true, false] {
             let mut responses = vec![
@@ -1518,6 +1597,7 @@ mod tests {
             remaining: (1..=34).map(|id| id.to_string()).collect(),
             last: Some("1".into()),
             fresh_cycle: true,
+            ..FavoritesQueue::default()
         });
         let tracks = backend.more(&[]).unwrap();
         assert_eq!(

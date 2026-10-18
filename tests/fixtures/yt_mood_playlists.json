@@ -1,0 +1,46 @@
+{
+  "contents": [
+    {
+      "musicTwoRowItemRenderer": {
+        "title": {
+          "runs": [
+            {
+              "text": "Lofi Loft"
+            }
+          ]
+        },
+        "navigationEndpoint": {
+          "browseEndpoint": {
+            "browseId": "VLRDCLAK5uy_kb7EBi6y3GrtJri4_ZH56Ms786DFEimbM",
+            "browseEndpointContextSupportedConfigs": {
+              "browseEndpointContextMusicConfig": {
+                "pageType": "MUSIC_PAGE_TYPE_PLAYLIST"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "musicTwoRowItemRenderer": {
+        "title": {
+          "runs": [
+            {
+              "text": "deep chill"
+            }
+          ]
+        },
+        "navigationEndpoint": {
+          "browseEndpoint": {
+            "browseId": "VLRDCLAK5uy_mPolD_J22gS1SKxufARWcTZd1UrAH_0ZI",
+            "browseEndpointContextSupportedConfigs": {
+              "browseEndpointContextMusicConfig": {
+                "pageType": "MUSIC_PAGE_TYPE_PLAYLIST"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

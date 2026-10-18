@@ -505,8 +505,8 @@ impl Engine {
     }
 
     pub fn start_mode(&mut self, mode: PlaybackMode) {
-        if mode == PlaybackMode::FavoritesShuffle && !self.can_shuffle_favorites() {
-            self.message = "This source does not support Favorites Shuffle".into();
+        if mode.is_favorites() && !self.can_shuffle_favorites() {
+            self.message = "This source does not support favorites playback".into();
             return;
         }
         self.mode = mode;
@@ -1347,7 +1347,7 @@ impl Engine {
                         if self.liked.len() > HISTORY_LIMIT {
                             self.liked.pop_front();
                         }
-                        if self.mode == PlaybackMode::FavoritesShuffle && !liked {
+                        if self.mode.is_favorites() && !liked {
                             self.queue
                                 .upcoming
                                 .retain(|queued| queued.cache_key() != track.cache_key());
@@ -1708,7 +1708,7 @@ mod tests {
 
         fn favorite_state(&mut self, track: &Track) -> Result<Option<bool>> {
             let log = self.0.lock().unwrap();
-            Ok(Some(if log.mode == PlaybackMode::FavoritesShuffle {
+            Ok(Some(if log.mode.is_favorites() {
                 track.id != "1" || log.favorite
             } else {
                 track.id == "1" && log.favorite
@@ -1761,7 +1761,7 @@ mod tests {
             if let Some(batch) = log.more_batches.pop_front() {
                 return Ok(batch);
             }
-            Ok(if log.mode == PlaybackMode::FavoritesShuffle {
+            Ok(if log.mode.is_favorites() {
                 (1..=3)
                     .filter(|id| *id != 1 || log.favorite)
                     .map(favorite_track)
@@ -1825,6 +1825,43 @@ mod tests {
                 engine.handle(event);
             }
         }
+    }
+
+    #[test]
+    fn newest_favorites_reuse_audio_on_navigation_and_remove_unliked_upcoming_tracks() {
+        let log = Arc::new(Mutex::new(ServiceLog::default()));
+        let (mut engine, _, events) = Engine::new(Box::new(TestBackend(log.clone()))).unwrap();
+        engine.start_mode(PlaybackMode::FavoritesNewest);
+        engine.paused = true;
+        pump(&mut engine, &events, prefetch_ready);
+        assert_eq!(engine.mode, PlaybackMode::FavoritesNewest);
+        assert_eq!(engine.track().unwrap().id, "1");
+        engine.next();
+        pump(&mut engine, &events, prefetch_ready);
+        assert_eq!(engine.track().unwrap().id, "2");
+        engine.previous();
+        pump(&mut engine, &events, prefetch_ready);
+        assert_eq!(engine.track().unwrap().id, "1");
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .resolved
+                .iter()
+                .filter(|(id, _)| id == "1")
+                .count(),
+            1
+        );
+        engine.more();
+        pump(&mut engine, &events, |engine| !engine.batch_pending);
+        assert!(engine.queue.upcoming.iter().any(|track| track.id == "1"));
+        engine.like();
+        pump(&mut engine, &events, |engine| !engine.like_pending);
+        assert!(!engine.is_liked());
+        assert!(engine.queue.upcoming.iter().all(|track| track.id != "1"));
+        engine
+            .shutdown()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
     }
 
     #[test]

@@ -13,6 +13,10 @@ use crate::{
     wave::FRAME_INTERVAL,
 };
 use anyhow::Result;
+#[cfg(not(windows))]
+use crossterm::event::{
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
@@ -35,6 +39,8 @@ use unicode_width::UnicodeWidthStr;
 struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        #[cfg(not(windows))]
+        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
         let _ = execute!(
             std::io::stdout(),
             crossterm::terminal::EndSynchronizedUpdate,
@@ -136,11 +142,28 @@ pub fn run(
         EnableFocusChange,
         EnableBracketedPaste
     )?;
+    #[cfg(not(windows))]
+    execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+        )
+    )?;
     std::thread::Builder::new()
         .name("keys".into())
         .spawn(move || {
+            let mut input = match crate::terminal_input::Reader::new() {
+                Ok(input) => input,
+                Err(_) => {
+                    let _ = events.send(Event::InputError);
+                    return;
+                }
+            };
             loop {
-                match event::read() {
+                match input.read() {
                     Ok(event) => {
                         if events.send(Event::Terminal(event)).is_err() {
                             break;
@@ -263,7 +286,16 @@ pub fn run(
         } else {
             wait
         };
-        match receiver.recv_timeout(wait) {
+        let incoming = receiver.recv_timeout(wait);
+        if let Ok(Event::Terminal(event)) = &incoming
+            && controls.update_modifiers(event)
+        {
+            dirty = true;
+            scene = None;
+        }
+        match incoming {
+            Ok(Event::Terminal(event::Event::Key(key)))
+                if matches!(key.code, KeyCode::Modifier(_)) => {}
             Ok(Event::Terminal(event::Event::FocusLost)) => {
                 controls.cancel_drag();
                 selection.cancel_drag();
@@ -464,8 +496,15 @@ pub fn run(
                                         format!("{} visualization enabled", visual.mode.label());
                                 }
                                 KeyCode::Char('w') => engine.start_mode(PlaybackMode::MyVibe),
-                                KeyCode::Char('f') => {
-                                    engine.start_mode(PlaybackMode::FavoritesShuffle)
+                                KeyCode::Char('f') => engine.start_mode(
+                                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                        PlaybackMode::FavoritesNewest
+                                    } else {
+                                        PlaybackMode::FavoritesShuffle
+                                    },
+                                ),
+                                KeyCode::Char('F') => {
+                                    engine.start_mode(PlaybackMode::FavoritesNewest)
                                 }
                                 KeyCode::Char('+') | KeyCode::Char('=') => {
                                     engine.change_volume(0.05)
@@ -654,7 +693,7 @@ fn build_scene(
     };
     let detail_rows = if favorites { 3u16 } else { 2 } + notice_rows - 1;
     let progress_rows = 1;
-    let control_rows = Controls::height(width, engine);
+    let control_rows = controls.height(width, engine);
     let track_text = engine.media_track().map(|track| {
         let artist = if !track.source.is_empty() && track.source != engine.source {
             format!("{} · {}", track.artist, track.source)
@@ -697,6 +736,8 @@ fn build_scene(
             engine.name,
             if engine.mode == PlaybackMode::FavoritesShuffle && engine.source == "vk" {
                 "My Music · Shuffle"
+            } else if engine.mode == PlaybackMode::FavoritesNewest && engine.source == "vk" {
+                "My Music · Newest first"
             } else if engine.mode == PlaybackMode::MyVibe && engine.source != "yandex" {
                 "Wave"
             } else {

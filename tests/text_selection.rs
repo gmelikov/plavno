@@ -785,6 +785,53 @@ fn tui_no_wave_keeps_controls_visible_and_renders_without_focus() {
 }
 
 #[test]
+fn tui_shift_replaces_favorites_button_and_restores_it_on_release_and_focus_loss() {
+    let (mut fixture, mut master) = spawn_player(&["--no-wave"]);
+    let mut output = Vec::new();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        screen.contains("f Favorites") && screen.contains("Playing") && screen.contains("tone")
+    });
+    assert!(!screen_text(&output).contains("F Newest first"));
+    let favorite_position = label_position(&output, "f Favorites");
+    assert!(output.windows(6).any(|bytes| bytes == b"\x1b[>15u"));
+    for release in [b"\x1b[57441;1:3u".as_slice(), b"\x1b[O"] {
+        master.write_all(b"\x1b[57441;2u").unwrap();
+        read_until(&mut master, &mut output, |bytes| {
+            screen_text(bytes).contains("F Newest first")
+        });
+        assert!(!screen_text(&output).contains("f Favorites"));
+        assert_eq!(label_position(&output, "F Newest first"), favorite_position);
+        master.write_all(release).unwrap();
+        read_until(&mut master, &mut output, |bytes| {
+            screen_text(bytes).contains("f Favorites")
+        });
+        assert!(!screen_text(&output).contains("F Newest first"));
+    }
+    // Releasing a key must not run its command with keyboard event reporting enabled.
+    master.write_all(b"\x1b[113;1:3u\x1b[57447;2u").unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        screen_text(bytes).contains("F Newest first")
+    });
+    assert!(fixture.child.try_wait().unwrap().is_none());
+    master.write_all(b"\x1b[113;1u").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let mut bytes = [0; 8192];
+        if let Ok(count) = master.read(&mut bytes) {
+            output.extend_from_slice(&bytes[..count]);
+        }
+        if let Some(status) = fixture.child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(output.windows(5).any(|bytes| bytes == b"\x1b[<1u"));
+}
+
+#[test]
 fn tui_compact_layout_keeps_track_text_and_controls_after_resizing() {
     let (mut fixture, mut master) = spawn_player(&[]);
     let mut output = Vec::new();

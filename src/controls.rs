@@ -1,5 +1,8 @@
 use crate::{backend::PlaybackMode, engine::Engine, visualization::Mode};
-use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEventKind, KeyModifiers, ModifierKeyCode, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -22,11 +25,16 @@ struct ButtonSpec {
 
 impl ButtonSpec {
     fn width(&self) -> u16 {
-        (self.label.width() + self.shortcut.width() + 3) as u16
+        let label_width = if matches!(self.key, KeyCode::Char('f' | 'F')) {
+            self.label.width().max("Newest first".width())
+        } else {
+            self.label.width()
+        };
+        (label_width + self.shortcut.width() + 3) as u16
     }
 }
 
-fn button_specs(engine: &Engine) -> Vec<ButtonSpec> {
+fn button_specs(engine: &Engine, shift: bool) -> Vec<ButtonSpec> {
     let playing = engine.playback_status() == "Playing";
     [
         ("Prev", "p", KeyCode::Char('p'), engine.can_previous()),
@@ -62,13 +70,15 @@ fn button_specs(engine: &Engine) -> Vec<ButtonSpec> {
                 .any(|s| s.key == "mixed" && s.available),
         ),
         (
-            if engine.source == "vk" {
+            if shift {
+                "Newest first"
+            } else if engine.source == "vk" {
                 "My Music"
             } else {
                 "Favorites"
             },
-            "f",
-            KeyCode::Char('f'),
+            if shift { "F" } else { "f" },
+            KeyCode::Char(if shift { 'F' } else { 'f' }),
             engine.can_shuffle_favorites(),
         ),
         ("Wave", "w", KeyCode::Char('w'), true),
@@ -172,6 +182,8 @@ pub struct Controls {
     drag: Option<Drag>,
     hover: Option<Target>,
     track: Option<(String, String)>,
+    shift: bool,
+    held_shifts: u8,
 }
 
 fn fraction(area: Rect, column: u16) -> Option<f64> {
@@ -187,14 +199,65 @@ fn scrub_speed(delta: f64, duration: f64, elapsed: Duration) -> f32 {
 }
 
 impl Controls {
-    pub fn height(width: u16, engine: &Engine) -> u16 {
-        button_layout(width, &button_specs(engine))
+    pub fn height(&self, width: u16, engine: &Engine) -> u16 {
+        button_layout(width, &button_specs(engine, self.shift))
             .last()
             .map_or(1, |area| area.y + 1)
     }
 
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            shift: self.shift,
+            held_shifts: self.held_shifts,
+            ..Self::default()
+        };
+    }
+
+    pub fn update_modifiers(&mut self, event: &Event) -> bool {
+        let shift = match event {
+            Event::Key(key) => {
+                let side = match key.code {
+                    KeyCode::Modifier(ModifierKeyCode::LeftShift) => 1,
+                    KeyCode::Modifier(ModifierKeyCode::RightShift) => 2,
+                    _ => 0,
+                };
+                if side != 0 {
+                    if key.kind == KeyEventKind::Release {
+                        self.held_shifts &= !side;
+                    } else {
+                        self.held_shifts |= side;
+                    }
+                    self.held_shifts != 0
+                } else {
+                    self.held_shifts != 0 || key.modifiers.contains(KeyModifiers::SHIFT)
+                }
+            }
+            Event::Mouse(mouse) => {
+                if !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.held_shifts = 0;
+                }
+                mouse.modifiers.contains(KeyModifiers::SHIFT)
+            }
+            Event::FocusLost => {
+                self.held_shifts = 0;
+                false
+            }
+            _ => return false,
+        };
+        if self.shift == shift {
+            return false;
+        }
+        self.shift = shift;
+        if matches!(self.drag, Some(Drag::Button(_))) {
+            self.drag = None;
+        }
+        self.hover = None;
+        for button in &mut self.buttons {
+            if matches!(button.key, KeyCode::Char('f' | 'F')) {
+                button.key = KeyCode::Char(if shift { 'F' } else { 'f' });
+            }
+        }
+        true
     }
 
     pub fn cancel_drag(&mut self) {
@@ -517,7 +580,7 @@ impl Controls {
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, engine: &Engine, visual: Option<Mode>) {
-        let buttons = button_specs(engine);
+        let buttons = button_specs(engine, self.shift);
         for (button, position) in buttons.iter().zip(button_layout(area.width, &buttons)) {
             if position.y >= area.height || position.is_empty() {
                 break;
@@ -545,6 +608,7 @@ impl Controls {
                 KeyCode::Char('l') => engine.is_liked(),
                 KeyCode::Char('m') => engine.source == "mixed",
                 KeyCode::Char('f') => engine.mode == PlaybackMode::FavoritesShuffle,
+                KeyCode::Char('F') => engine.mode == PlaybackMode::FavoritesNewest,
                 KeyCode::Char('w') => {
                     engine.mode == PlaybackMode::MyVibe && engine.source != "mixed"
                 }
@@ -628,6 +692,57 @@ mod tests {
             column,
             row,
             modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn shift_tracks_both_keys_survives_redraw_resets_and_clears_on_focus_loss() {
+        use crossterm::event::KeyEvent;
+        let key = |side, kind| {
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Modifier(side),
+                KeyModifiers::SHIFT,
+                kind,
+            ))
+        };
+        let mut controls = Controls::default();
+        assert!(controls.update_modifiers(&key(ModifierKeyCode::LeftShift, KeyEventKind::Press)));
+        assert!(!controls.update_modifiers(&key(ModifierKeyCode::RightShift, KeyEventKind::Press)));
+        controls.reset();
+        assert!(controls.shift);
+        assert!(
+            !controls.update_modifiers(&key(ModifierKeyCode::LeftShift, KeyEventKind::Release))
+        );
+        assert!(controls.shift);
+        assert!(
+            controls.update_modifiers(&key(ModifierKeyCode::RightShift, KeyEventKind::Release))
+        );
+        assert!(!controls.shift);
+        assert!(controls.update_modifiers(&key(ModifierKeyCode::LeftShift, KeyEventKind::Press)));
+        assert!(controls.update_modifiers(&Event::FocusLost));
+        assert!(!controls.shift && controls.held_shifts == 0);
+    }
+
+    #[test]
+    fn shift_mouse_click_uses_newest_action_before_the_next_redraw() {
+        let mut controls = Controls::default();
+        controls.buttons.push(Button {
+            area: Rect::new(0, 0, 20, 1),
+            key: KeyCode::Char('f'),
+            enabled: true,
+        });
+        for (modifiers, expected) in [(KeyModifiers::SHIFT, 'F'), (KeyModifiers::NONE, 'f')] {
+            let mut press = mouse(MouseEventKind::Down(MouseButton::Left), 2, 0);
+            press.modifiers = modifiers;
+            controls.update_modifiers(&Event::Mouse(press));
+            controls.handle(press, None);
+            let mut release = mouse(MouseEventKind::Up(MouseButton::Left), 2, 0);
+            release.modifiers = modifiers;
+            controls.update_modifiers(&Event::Mouse(release));
+            assert_eq!(
+                controls.handle(release, None),
+                Some(Action::Key(KeyCode::Char(expected)))
+            );
         }
     }
 

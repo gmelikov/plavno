@@ -105,6 +105,13 @@ fn radio_override_rejects_missing_values_ambiguous_sources_and_conflicting_modes
             "ytmusic",
             "--seed",
             "track",
+            "--favorites-newest",
+        ],
+        vec![
+            "--source",
+            "ytmusic",
+            "--seed",
+            "track",
             "--file",
             "track.mp3",
         ],
@@ -266,4 +273,27 @@ fn invalid_local_configuration_and_arguments_do_not_break_other_sources_or_overw
     let sources = String::from_utf8(output.stdout).unwrap();
     assert!(sources.contains("Yandex Music     Ready"));
     assert!(sources.contains("Invalid local directory settings"));
+}
+
+#[test]
+fn newest_favorites_flag_is_accepted_and_conflicts_with_local_files() {
+    let config = ConfigDir::new();
+    let output = config
+        .command()
+        .env("YANDEX_MUSIC_TOKEN", "fixture-token")
+        .arg("--favorites-newest")
+        .output()
+        .unwrap();
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("interactive terminal"), "{error}");
+    let output = config
+        .command()
+        .args(["--favorites-newest", "--file", "track.mp3"])
+        .output()
+        .unwrap();
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains("--file cannot be combined") && error.contains("--favorites-newest"),
+        "{error}"
+    );
 }

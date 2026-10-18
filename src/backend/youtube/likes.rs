@@ -231,7 +231,7 @@ impl YouTube {
         Ok(RateLimited::for_service("YouTube", Duration::from_secs(wait)).into())
     }
 
-    fn api(&mut self, endpoint: &str, mut body: Value) -> Result<Value> {
+    pub(super) fn api(&mut self, endpoint: &str, mut body: Value) -> Result<Value> {
         self.check_cooldown()?;
         let path =
             self.session()?.cookies.as_ref().context(
@@ -418,11 +418,13 @@ impl YouTube {
             }
             ensure!(!tracks.is_empty(), "YouTube Music Liked Music is empty");
             let mut ids: Vec<String> = tracks.iter().map(|t| t.id.clone()).collect();
-            super::super::yandex::shuffle_favorites(
-                &mut ids,
-                self.session()?.favorites_last.as_deref(),
-                &mut plavno_platform::Random::new()?,
-            )?;
+            if !self.session()?.favorites_newest {
+                super::super::yandex::shuffle_favorites(
+                    &mut ids,
+                    self.session()?.favorites_last.as_deref(),
+                    &mut plavno_platform::Random::new()?,
+                )?;
+            }
             let mut pool: std::collections::HashMap<_, _> =
                 tracks.into_iter().map(|t| (t.id.clone(), t)).collect();
             self.session.as_mut().unwrap().favorites = Some(
@@ -450,12 +452,13 @@ impl YouTube {
             .cookies
             .as_ref()
             .context("YouTube Liked Music requires saved cookies")?;
+        self.session.as_mut().unwrap().favorites_newest = mode == PlaybackMode::FavoritesNewest;
         self.favorite_batch(&[])
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::tests::Fixture;
     use super::*;
     use std::{
@@ -463,7 +466,7 @@ mod tests {
         net::TcpListener,
     };
 
-    fn account(fixture: &Fixture) -> YouTube {
+    pub(crate) fn account(fixture: &Fixture) -> YouTube {
         let cookies = fixture.0.join("cookies.txt");
         crate::config::save_private(
             &cookies,
@@ -478,7 +481,9 @@ mod tests {
         fixture.backend()
     }
 
-    fn server(responses: Vec<(u16, Value)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    pub(crate) fn server(
+        responses: Vec<(u16, Value)>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}/", listener.local_addr().unwrap());
         let worker = std::thread::spawn(move || {
@@ -819,48 +824,60 @@ mod tests {
 
     #[test]
     fn liked_music_paginates_deduplicates_and_reuses_the_shuffle_queue() {
-        let fixture = Fixture::new();
-        let mut youtube = account(&fixture);
-        let first: Vec<_> = (0..20).map(|i| song(&format!("music{i:06}"))).collect();
-        let mut second: Vec<_> = (15..30).map(|i| song(&format!("music{i:06}"))).collect();
-        let mut podcast = song("podcast0000");
-        podcast["musicResponsiveListItemRenderer"]["overlay"]["watchEndpoint"]["watchEndpointMusicSupportedConfigs"]
-            ["watchEndpointMusicConfig"]["musicVideoType"] =
-            json!("MUSIC_VIDEO_TYPE_PODCAST_EPISODE");
-        second.push(podcast);
-        let (base, worker) = server(vec![
-            (
-                200,
-                json!({"musicPlaylistShelfRenderer":{"contents":first,"continuations":[{"nextContinuationData":{"continuation":"page2"}}]},"suggestions":[song("abcdefghijk")]}),
-            ),
-            (
-                200,
-                json!({"onResponseReceivedActions":[{"appendContinuationItemsAction":{"continuationItems":second}}]}),
-            ),
-        ]);
-        youtube.api_base = Some(base);
-        let mut batch = youtube.start_mode(PlaybackMode::FavoritesShuffle).unwrap();
-        assert_eq!(batch.len(), 25);
-        assert_eq!(youtube.favorite_state(&batch[0]).unwrap(), Some(true));
-        let next = youtube.more(&[]).unwrap();
-        assert_eq!(next.len(), 5);
-        batch.extend(next);
-        let ids: HashSet<_> = batch.iter().map(|t| &t.id).collect();
-        assert_eq!(ids.len(), 30);
-        assert!(
-            batch.iter().all(|t| t.duration == Some(192.0)
+        for mode in [
+            PlaybackMode::FavoritesShuffle,
+            PlaybackMode::FavoritesNewest,
+        ] {
+            let fixture = Fixture::new();
+            let mut youtube = account(&fixture);
+            let first: Vec<_> = (0..20).map(|i| song(&format!("music{i:06}"))).collect();
+            let mut second: Vec<_> = (15..30).map(|i| song(&format!("music{i:06}"))).collect();
+            let mut podcast = song("podcast0000");
+            podcast["musicResponsiveListItemRenderer"]["overlay"]["watchEndpoint"]["watchEndpointMusicSupportedConfigs"]
+                ["watchEndpointMusicConfig"]["musicVideoType"] =
+                json!("MUSIC_VIDEO_TYPE_PODCAST_EPISODE");
+            second.push(podcast);
+            let (base, worker) = server(vec![
+                (
+                    200,
+                    json!({"musicPlaylistShelfRenderer":{"contents":first,"continuations":[{"nextContinuationData":{"continuation":"page2"}}]},"suggestions":[song("abcdefghijk")]}),
+                ),
+                (
+                    200,
+                    json!({"onResponseReceivedActions":[{"appendContinuationItemsAction":{"continuationItems":second}}]}),
+                ),
+            ]);
+            youtube.api_base = Some(base);
+            let mut batch = youtube.start_mode(mode).unwrap();
+            assert_eq!(batch.len(), 25);
+            assert_eq!(youtube.favorite_state(&batch[0]).unwrap(), Some(true));
+            let next = youtube.more(&[]).unwrap();
+            assert_eq!(next.len(), 5);
+            batch.extend(next);
+            if mode == PlaybackMode::FavoritesNewest {
+                assert_eq!(
+                    batch
+                        .iter()
+                        .map(|track| track.id.clone())
+                        .collect::<Vec<_>>(),
+                    (0..30).map(|i| format!("music{i:06}")).collect::<Vec<_>>()
+                );
+            }
+            let ids: HashSet<_> = batch.iter().map(|t| &t.id).collect();
+            assert_eq!(ids.len(), 30);
+            assert!(batch.iter().all(|t| t.duration == Some(192.0)
                 && t.artist == "Artist"
-                && t.cover_url.is_some())
-        );
-        assert!(ids.iter().all(|id| id.starts_with("music")));
-        let requests = worker.join().unwrap();
-        assert_eq!(requests.len(), 2);
-        let body = |request: &str| {
-            serde_json::from_str::<Value>(request.split_once("\r\n\r\n").unwrap().1).unwrap()
-        };
-        assert_eq!(body(&requests[0])["browseId"], "VLLM");
-        assert_eq!(body(&requests[1])["continuation"], "page2");
-        assert!(fixture.calls().is_empty());
+                && t.cover_url.is_some()));
+            assert!(ids.iter().all(|id| id.starts_with("music")));
+            let requests = worker.join().unwrap();
+            assert_eq!(requests.len(), 2);
+            let body = |request: &str| {
+                serde_json::from_str::<Value>(request.split_once("\r\n\r\n").unwrap().1).unwrap()
+            };
+            assert_eq!(body(&requests[0])["browseId"], "VLLM");
+            assert_eq!(body(&requests[1])["continuation"], "page2");
+            assert!(fixture.calls().is_empty());
+        }
     }
 
     #[test]

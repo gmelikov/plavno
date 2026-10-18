@@ -36,6 +36,7 @@ struct LibraryQueue {
     remaining: VecDeque<String>,
     last: Option<String>,
     fresh_cycle: bool,
+    newest_first: bool,
 }
 
 impl Vk {
@@ -439,9 +440,11 @@ impl Vk {
                 ensure!(offset < 100_000, "VK My Music pagination did not finish");
             }
             ensure!(!ids.is_empty(), "VK My Music is empty; add tracks first");
-            let mut random = std::io::BufReader::new(plavno_platform::Random::new()?);
             let queue = self.library.as_mut().unwrap();
-            super::yandex::shuffle_favorites(&mut ids, queue.last.as_deref(), &mut random)?;
+            if !queue.newest_first {
+                let mut random = std::io::BufReader::new(plavno_platform::Random::new()?);
+                super::yandex::shuffle_favorites(&mut ids, queue.last.as_deref(), &mut random)?;
+            }
             queue.remaining = ids.into();
             queue.fresh_cycle = true;
         }
@@ -479,7 +482,8 @@ impl Vk {
             let mut result: Vec<_> = ids.iter().filter_map(|id| tracks.remove(id)).collect();
             let queue = self.library.as_mut().unwrap();
             queue.remaining.drain(..ids.len());
-            if queue.fresh_cycle
+            if !queue.newest_first
+                && queue.fresh_cycle
                 && result.first().map(|t| &t.id) == queue.last.as_ref()
                 && !result.is_empty()
             {
@@ -1003,8 +1007,11 @@ impl Backend for Vk {
     fn start_mode(&mut self, mode: PlaybackMode) -> Result<Vec<Track>> {
         match mode {
             PlaybackMode::MyVibe => self.start(),
-            PlaybackMode::FavoritesShuffle => {
-                self.library = Some(LibraryQueue::default());
+            PlaybackMode::FavoritesShuffle | PlaybackMode::FavoritesNewest => {
+                self.library = Some(LibraryQueue {
+                    newest_first: mode == PlaybackMode::FavoritesNewest,
+                    ..LibraryQueue::default()
+                });
                 self.library_batch()
             }
         }
@@ -1336,9 +1343,13 @@ mod tests {
 
     #[test]
     fn my_music_pages_the_library_skips_unavailable_tracks_and_refreshes_each_pass() {
-        let audio = |id| json!({"id":id,"owner_id":123,"title":"Library track","url":"https://audio.example/track.mp3"});
-        let (base, server) = web::fixture_server(|_| {
-            vec![
+        for mode in [
+            PlaybackMode::FavoritesShuffle,
+            PlaybackMode::FavoritesNewest,
+        ] {
+            let audio = |id| json!({"id":id,"owner_id":123,"title":"Library track","url":"https://audio.example/track.mp3"});
+            let (base, server) = web::fixture_server(|_| {
+                vec![
             json!({"response":[{"id":123}]}).to_string(),
             json!({"response":{"count":3,"items":[audio(1),audio(2)]}}).to_string(),
             json!({"response":{"count":3,"items":[audio(3)]}}).to_string(),
@@ -1346,29 +1357,39 @@ mod tests {
             json!({"response":{"count":1,"items":[audio(4)]}}).to_string(),
             json!({"response":[audio(4)]}).to_string(),
         ]
-        });
-        let mut backend = Vk::new(PathBuf::new());
-        backend.api = base;
-        backend.config = Some(json!({"token":"fixture-token"}));
-        let tracks = backend.start_mode(PlaybackMode::FavoritesShuffle).unwrap();
-        assert_eq!(
-            tracks.iter().map(|t| t.id.as_str()).collect::<HashSet<_>>(),
-            HashSet::from(["123_1", "123_2"])
-        );
-        assert_eq!(backend.streams.len(), 2);
-        assert!(backend.recent.is_empty());
-        for track in &tracks {
-            assert!(matches!(
-                backend.resolve(track).unwrap(),
-                Input::Http { .. }
-            ));
+            });
+            let mut backend = Vk::new(PathBuf::new());
+            backend.api = base;
+            backend.config = Some(json!({"token":"fixture-token"}));
+            let tracks = backend.start_mode(mode).unwrap();
+            assert_eq!(
+                tracks.iter().map(|t| t.id.as_str()).collect::<HashSet<_>>(),
+                HashSet::from(["123_1", "123_2"])
+            );
+            if mode == PlaybackMode::FavoritesNewest {
+                assert_eq!(
+                    tracks
+                        .iter()
+                        .map(|track| track.id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["123_1", "123_2"]
+                );
+            }
+            assert_eq!(backend.streams.len(), 2);
+            assert!(backend.recent.is_empty());
+            for track in &tracks {
+                assert!(matches!(
+                    backend.resolve(track).unwrap(),
+                    Input::Http { .. }
+                ));
+            }
+            assert_eq!(backend.more(&["123_4".into()]).unwrap()[0].id, "123_4");
+            let requests = server.join().unwrap();
+            assert!(requests[1].starts_with("POST /audio.get"));
+            assert!(requests[1].contains("owner_id=123") && requests[1].contains("offset=0"));
+            assert!(requests[2].contains("offset=2"));
+            assert!(requests[3].starts_with("POST /audio.getById"));
         }
-        assert_eq!(backend.more(&["123_4".into()]).unwrap()[0].id, "123_4");
-        let requests = server.join().unwrap();
-        assert!(requests[1].starts_with("POST /audio.get"));
-        assert!(requests[1].contains("owner_id=123") && requests[1].contains("offset=0"));
-        assert!(requests[2].contains("offset=2"));
-        assert!(requests[3].starts_with("POST /audio.getById"));
     }
 
     #[test]

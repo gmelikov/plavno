@@ -1388,13 +1388,14 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "plavno"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "aes",
  "anyhow",
  "base64 0.22.1",
  "block2",
  "crossterm",
+ "crossterm_winapi",
  "ctr",
  "dbus",
  "dbus-crossroads",
@@ -1424,6 +1425,7 @@ dependencies = [
  "unicode-width",
  "ureq",
  "url",
+ "winapi",
  "windows 0.58.0",
 ]
 

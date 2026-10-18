@@ -1,6 +1,6 @@
 [package]
 name = "plavno"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "A lightweight terminal music player for Linux, macOS and Windows with service waves and library shuffle"
@@ -50,6 +50,8 @@ dbus = "0.9"
 dbus-crossroads = "0.5"
 
 [target.'cfg(windows)'.dependencies]
+crossterm_winapi = "0.9.1"
+winapi = { version = "0.3.9", features = ["winuser"] }
 windows = { version = "0.58", features = ["Foundation", "Media", "Storage_Streams", "Win32_Foundation", "Win32_System_WinRT", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_UI_Shell"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
