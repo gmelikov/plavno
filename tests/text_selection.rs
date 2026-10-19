@@ -60,6 +60,41 @@ fn screen_text(bytes: &[u8]) -> String {
     terminal::screen_text(bytes, 80, 48)
 }
 
+fn has_sixel_since(bytes: &[u8], since: usize) -> bool {
+    let mut bytes = &bytes[since..];
+    // One PTY read can contain an image followed by a control-only redraw.
+    while let Some(start) = bytes.windows(8).position(|chunk| chunk == b"\x1b[?2026h") {
+        let frame = &bytes[start..];
+        let Some(end) = frame.windows(8).position(|chunk| chunk == b"\x1b[?2026l") else {
+            break;
+        };
+        if frame[..end].windows(8).any(|chunk| chunk == b"\x1bP7;1;0q") {
+            return true;
+        }
+        bytes = &frame[end + 8..];
+    }
+    false
+}
+
+#[test]
+fn sixel_wait_accepts_an_image_followed_by_a_control_only_frame() {
+    let output = b"\x1b[?2026h\x1bP7;1;0q~\x1b\\\x1b[?2026l\x1b[?2026h n Next \x1b[?2026l";
+    assert!(has_sixel_since(output, 0));
+}
+
+#[test]
+fn sixel_wait_ignores_images_before_the_command_and_unfinished_frames() {
+    let mut output = b"\x1b[?2026h\x1bP7;1;0q~\x1b\\\x1b[?2026l".to_vec();
+    let since = output.len();
+    assert!(!has_sixel_since(&output, since));
+    output.extend_from_slice(b"\x1b[?2026h n Next \x1b[?2026l");
+    assert!(!has_sixel_since(&output, since));
+    output.extend_from_slice(b"\x1b[?2026h\x1bP7;1;0q~\x1b\\");
+    assert!(!has_sixel_since(&output, since));
+    output.extend_from_slice(b"\x1b[?2026l");
+    assert!(has_sixel_since(&output, since));
+}
+
 fn has_wave(screen: &str) -> bool {
     screen
         .chars()
@@ -502,9 +537,7 @@ fn tui_sixel_update_modes_preserve_menus_controls_and_resize() {
                 .unwrap_or(0)
         };
         read_until(&mut master, &mut output, |bytes| {
-            screen_text(bytes).contains("tone")
-                && bytes.windows(sixel.len()).any(|chunk| chunk == sixel)
-                && bytes.windows(8).any(|chunk| chunk == b"\x1b[?2026l")
+            screen_text(bytes).contains("tone") && has_sixel_since(bytes, 0)
         });
         assert!(output.windows(8).any(|chunk| chunk == b"\x1b[?2026h"));
         let mut starts: Vec<_> = output
@@ -546,12 +579,11 @@ fn tui_sixel_update_modes_preserve_menus_controls_and_resize() {
                 .windows(sixel.len())
                 .any(|chunk| chunk == sixel)
         );
+        let since = output.len();
         master.write_all(b"b").unwrap();
         read_until(&mut master, &mut output, |bytes| {
             screen_text(bytes).contains("Dance visualization enabled")
-                && bytes[last_frame(bytes)..]
-                    .windows(sixel.len())
-                    .any(|chunk| chunk == sixel)
+                && has_sixel_since(bytes, since)
         });
         master.write_all(b"s").unwrap();
         read_until(&mut master, &mut output, |bytes| {
@@ -562,12 +594,10 @@ fn tui_sixel_update_modes_preserve_menus_controls_and_resize() {
                 .windows(sixel.len())
                 .any(|chunk| chunk == sixel)
         );
+        let since = output.len();
         master.write_all(b"\x1b").unwrap();
         read_until(&mut master, &mut output, |bytes| {
-            screen_text(bytes).contains("tone")
-                && bytes[last_frame(bytes)..]
-                    .windows(sixel.len())
-                    .any(|chunk| chunk == sixel)
+            screen_text(bytes).contains("tone") && has_sixel_since(bytes, since)
         });
         master.write_all(b"h").unwrap();
         read_until(&mut master, &mut output, |bytes| {
@@ -578,12 +608,10 @@ fn tui_sixel_update_modes_preserve_menus_controls_and_resize() {
                 .windows(sixel.len())
                 .any(|chunk| chunk == sixel)
         );
+        let since = output.len();
         master.write_all(b"\x1b").unwrap();
         read_until(&mut master, &mut output, |bytes| {
-            screen_text(bytes).contains("tone")
-                && bytes[last_frame(bytes)..]
-                    .windows(sixel.len())
-                    .any(|chunk| chunk == sixel)
+            screen_text(bytes).contains("tone") && has_sixel_since(bytes, since)
         });
 
         let size = libc::winsize {
@@ -592,18 +620,18 @@ fn tui_sixel_update_modes_preserve_menus_controls_and_resize() {
             ws_xpixel: 576,
             ws_ypixel: 512,
         };
+        let since = output.len();
         assert_eq!(
             unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
             0
         );
         read_until(&mut master, &mut output, |bytes| {
-            let frame = &bytes[last_frame(bytes)..];
             let screen = screen_text(bytes);
             screen
                 .lines()
                 .position(|line| line.contains('╰'))
                 .is_some_and(|line| line < 32)
-                && frame.windows(sixel.len()).any(|chunk| chunk == sixel)
+                && has_sixel_since(bytes, since)
         });
         master.write_all(b"v").unwrap();
         read_until(&mut master, &mut output, |bytes| {
