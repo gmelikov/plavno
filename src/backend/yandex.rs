@@ -720,6 +720,8 @@ impl FileDownload {
             }
             _ => bail!("The API returned an unsupported transport"),
         };
+        // The API may label lossy fallbacks as "lossless". Use the selected codec
+        // and bitrate to describe the stream instead of rejecting playable audio.
         let codec = if self.codec.starts_with("flac") {
             "FLAC · lossless"
         } else if self.codec == "mp3" {
@@ -732,10 +734,6 @@ impl FileDownload {
         } else {
             codec.into()
         };
-        ensure!(
-            self.quality != "lossless" || self.codec.starts_with("flac"),
-            "The API returned inconsistent audio quality"
-        );
         Ok(Input::Http {
             headers: Vec::new(),
             url: self.url,
@@ -854,6 +852,13 @@ mod tests {
     fn stream_server(
         replies: Vec<(&'static str, u16)>,
     ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        stream_server_with_codec(replies, "flac-mp4")
+    }
+
+    fn stream_server_with_codec(
+        replies: Vec<(&'static str, u16)>,
+        codec: &'static str,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
         use std::{
             io::{BufRead, Write},
             net::TcpListener,
@@ -908,7 +913,8 @@ mod tests {
                 }
                 requests.push(request);
                 let body = if path == "/get-file-info?" && status == 200 {
-                    json!({"result":{"downloadInfo":{"codec":"flac-mp4","quality":"lossless","bitrate":0,
+                    let bitrate = if codec.starts_with("flac") { 0 } else { 320 };
+                    json!({"result":{"downloadInfo":{"codec":codec,"quality":"lossless","bitrate":bitrate,
                         "transport":"encraw","url":audio_url,"key":"000102030405060708090a0b0c0d0e0f"}}}).to_string()
                 } else {
                     "x".into()
@@ -924,6 +930,51 @@ mod tests {
         parse_track(&json!({"id":12,"title":"Fixture"}), "batch")
             .unwrap()
             .unwrap()
+    }
+
+    #[test]
+    fn lossless_label_allows_lossy_streams_and_reuses_cached_metadata_after_restart() {
+        for (codec, hint, quality) in [
+            ("mp3", "mp3", "MP3 · 320 kbps"),
+            ("aac-mp4", "m4a", "AAC · 320 kbps"),
+        ] {
+            let directory = std::env::temp_dir().join(format!(
+                "plavno-stream-quality-{}-{codec}",
+                std::process::id()
+            ));
+            let (base, server) =
+                stream_server_with_codec(vec![("/get-file-info?", 200), ("/audio", 206)], codec);
+            let mut track = stream_track();
+            for restarted in [false, true] {
+                let mut backend = Yandex::with_cache("test-token".into(), directory.clone());
+                backend.base = base.clone();
+                if restarted {
+                    track.batch = "new-session".into();
+                }
+                let Input::Http {
+                    hint: actual_hint,
+                    quality: actual_quality,
+                    aes128_key,
+                    ..
+                } = backend.resolve(&track).unwrap()
+                else {
+                    panic!("Expected HTTP");
+                };
+                assert_eq!(actual_hint, hint);
+                assert_eq!(actual_quality, quality);
+                assert_eq!(aes128_key, Some(std::array::from_fn(|i| i as u8)));
+            }
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|r| r.starts_with("GET /get-file-info?"))
+                    .count(),
+                1
+            );
+            std::fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     #[test]
