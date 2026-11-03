@@ -156,6 +156,14 @@ fn spawn_player(args: &[&str]) -> (Fixture, File) {
 }
 
 fn spawn_player_with_state(args: &[&str], state: Option<&Path>) -> (Fixture, File) {
+    spawn_player_with_output_failure(args, state, false)
+}
+
+fn spawn_player_with_output_failure(
+    args: &[&str],
+    state: Option<&Path>,
+    output_failure: bool,
+) -> (Fixture, File) {
     static NEXT_FIXTURE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let root = std::env::temp_dir().join(format!(
         "plavno-tui-test-{}-{}-{}",
@@ -219,6 +227,9 @@ fn spawn_player_with_state(args: &[&str], state: Option<&Path>) -> (Fixture, Fil
     command.env("ALSA_CONFIG_PATH", &alsa);
     #[cfg(feature = "test-audio")]
     command.env("PLAVNO_TEST_AUDIO", "1");
+    if output_failure {
+        command.env("PLAVNO_TEST_AUDIO_FAIL", "1");
+    }
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
@@ -229,6 +240,65 @@ fn spawn_player_with_state(args: &[&str], state: Option<&Path>) -> (Fixture, Fil
     }
     let child = command.spawn().unwrap();
     (Fixture { root, child }, master)
+}
+
+#[cfg(feature = "test-audio")]
+#[test]
+fn audio_output_error_storm_exits_once_and_restores_the_terminal() {
+    let (mut fixture, mut master) = spawn_player_with_output_failure(&[], None, true);
+    let mut output = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut bytes = [0; 8192];
+        match master.read(&mut bytes) {
+            Ok(count) => output.extend_from_slice(&bytes[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => {}
+            Err(error) => panic!("Failed to read terminal: {error}"),
+        }
+        if let Some(status) = fixture.child.try_wait().unwrap() {
+            assert!(
+                !status.success(),
+                "An audio output failure reported success"
+            );
+            while let Ok(count) = master.read(&mut bytes) {
+                if count == 0 {
+                    break;
+                }
+                output.extend_from_slice(&bytes[..count]);
+            }
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Output failure did not stop the player"
+        );
+        assert!(
+            output.len() < 128 * 1024,
+            "Audio errors flooded the terminal"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let text = String::from_utf8_lossy(&output);
+    assert_eq!(text.matches("Audio output failed:").count(), 1);
+    assert_eq!(text.matches("POLLERR").count(), 1);
+    assert!(!text.contains("audio stream error:"));
+    assert!(text.find("\x1b[?1049l").unwrap() < text.find("Audio output failed:").unwrap());
+    let mut settings = unsafe { std::mem::zeroed::<libc::termios>() };
+    assert_eq!(
+        unsafe { libc::tcgetattr(master.as_raw_fd(), &mut settings) },
+        0
+    );
+    assert_ne!(
+        settings.c_lflag & libc::ICANON,
+        0,
+        "Terminal was left in raw mode"
+    );
+    assert_ne!(
+        settings.c_lflag & libc::ECHO,
+        0,
+        "Terminal echo was not restored"
+    );
 }
 
 fn check_title_selection(args: &[&str]) {

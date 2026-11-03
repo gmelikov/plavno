@@ -4,6 +4,8 @@ use ctr::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use plavno_platform::process::Process as Child;
 #[cfg(not(test))]
 use rodio::OutputStreamBuilder;
+#[cfg(not(test))]
+use rodio::cpal::traits::HostTrait;
 use rodio::{Decoder, OutputStream, Sink, Source, mixer::Mixer};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -11,7 +13,7 @@ use std::{
     io::{self, BufReader, Read, Seek, SeekFrom, Write},
     process::{Command, Stdio},
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, TryRecvError},
     },
@@ -160,10 +162,51 @@ pub struct Prepared {
 
 pub struct Audio {
     _stream: Option<OutputStream>,
+    output_error: Arc<OnceLock<String>>,
     mixer: Mixer,
     pub sink: Sink,
     #[cfg(any(test, feature = "test-audio"))]
     _test_output: Option<TestOutput>,
+}
+
+fn output_error_callback(
+    error: Arc<OnceLock<String>>,
+) -> impl FnMut(rodio::cpal::StreamError) + Clone {
+    move |failure| {
+        // Backends can report the same failure in a tight loop. Keep one error,
+        // without writing into the TUI or allocating for subsequent callbacks.
+        error.get_or_init(|| failure.to_string());
+    }
+}
+
+#[cfg(not(test))]
+fn open_output() -> std::result::Result<(OutputStream, Arc<OnceLock<String>>), rodio::StreamError> {
+    let open = |builder: OutputStreamBuilder, fallback: bool| {
+        let error = Arc::new(OnceLock::new());
+        let builder = builder.with_error_callback(output_error_callback(error.clone()));
+        let stream = if fallback {
+            builder.open_stream_or_fallback()
+        } else {
+            builder.open_stream()
+        }?;
+        Ok((stream, error))
+    };
+    // Preserve Rodio's default-device and alternative-device/configuration fallback.
+    OutputStreamBuilder::from_default_device()
+        .and_then(|builder| open(builder, false))
+        .or_else(|original| {
+            rodio::cpal::default_host()
+                .output_devices()
+                .ok()
+                .and_then(|mut devices| {
+                    devices.find_map(|device| {
+                        OutputStreamBuilder::from_device(device)
+                            .and_then(|builder| open(builder, true))
+                            .ok()
+                    })
+                })
+                .ok_or(original)
+        })
 }
 
 impl Audio {
@@ -178,20 +221,20 @@ impl Audio {
         if std::env::var_os("PLAVNO_TEST_AUDIO").is_some_and(|value| value == "1") {
             return Self::test_output();
         }
-        let mut stream =
-            OutputStreamBuilder::open_default_stream().context(if cfg!(target_os = "macos") {
-                "Failed to open the CoreAudio default output; check macOS Sound settings"
-            } else if cfg!(windows) {
-                "Failed to open the WASAPI default output; check Windows Sound settings"
-            } else {
-                "Failed to open the audio device; check ALSA/PipeWire/PulseAudio"
-            })?;
+        let (mut stream, output_error) = open_output().context(if cfg!(target_os = "macos") {
+            "Failed to open the CoreAudio default output; check macOS Sound settings"
+        } else if cfg!(windows) {
+            "Failed to open the WASAPI default output; check Windows Sound settings"
+        } else {
+            "Failed to open the audio device; check ALSA/PipeWire/PulseAudio"
+        })?;
         stream.log_on_drop(false);
         let sink = Sink::connect_new(stream.mixer());
         sink.set_volume(1.0);
         let mixer = stream.mixer().clone();
         Ok(Self {
             _stream: Some(stream),
+            output_error,
             mixer,
             sink,
             #[cfg(feature = "test-audio")]
@@ -204,9 +247,27 @@ impl Audio {
         let (mixer, mut output) = rodio::mixer::mixer(2, 44_100);
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
+        let output_error: Arc<OnceLock<String>> = Arc::default();
+        #[cfg(feature = "test-audio")]
+        let failure = std::env::var_os("PLAVNO_TEST_AUDIO_FAIL")
+            .is_some_and(|value| value == "1")
+            .then(|| output_error.clone());
         let worker = std::thread::Builder::new()
             .name("test-audio".into())
             .spawn(move || {
+                #[cfg(feature = "test-audio")]
+                if let Some(error) = failure {
+                    std::thread::sleep(Duration::from_millis(100));
+                    let mut report = output_error_callback(error);
+                    report(rodio::cpal::StreamError::BackendSpecific {
+                        err: rodio::cpal::BackendSpecificError {
+                            description: "`alsa::poll()` returned POLLERR".into(),
+                        },
+                    });
+                    for _ in 0..100_000 {
+                        report(rodio::cpal::StreamError::DeviceNotAvailable);
+                    }
+                }
                 while !stopped.load(Ordering::Relaxed) {
                     output.by_ref().take(882).for_each(drop);
                     std::thread::sleep(Duration::from_millis(10));
@@ -215,6 +276,7 @@ impl Audio {
         let sink = Sink::connect_new(&mixer);
         Ok(Self {
             _stream: None,
+            output_error,
             mixer,
             sink,
             _test_output: Some(TestOutput {
@@ -222,6 +284,20 @@ impl Audio {
                 worker: Some(worker),
             }),
         })
+    }
+
+    pub fn check_output(&self) -> Result<()> {
+        if let Some(error) = self.output_error.get() {
+            anyhow::bail!("Audio output failed: {error}");
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn fail_output(&self) {
+        output_error_callback(self.output_error.clone())(
+            rodio::cpal::StreamError::DeviceNotAvailable,
+        );
     }
 
     pub fn play(&mut self, source: PcmSource, paused: bool, volume: f32, speed: f32) {
@@ -1202,6 +1278,25 @@ fn prepare_segment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_error_storm_keeps_the_first_failure_without_a_queue() {
+        let audio = Audio::new().unwrap();
+        audio.check_output().unwrap();
+        let mut callback = output_error_callback(audio.output_error.clone());
+        callback(rodio::cpal::StreamError::BackendSpecific {
+            err: rodio::cpal::BackendSpecificError {
+                description: "`alsa::poll()` returned POLLERR".into(),
+            },
+        });
+        for _ in 0..100_000 {
+            callback(rodio::cpal::StreamError::DeviceNotAvailable);
+        }
+        let error = audio.check_output().unwrap_err().to_string();
+        assert!(error.contains("POLLERR"), "{error}");
+        assert!(!error.contains("no longer available"));
+        assert_eq!(Arc::strong_count(&audio.output_error), 2);
+    }
 
     fn failing_http_server(status: Option<u16>) -> (String, std::thread::JoinHandle<()>) {
         use std::{io::BufRead, net::TcpListener};

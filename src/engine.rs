@@ -1391,9 +1391,10 @@ impl Engine {
         }
     }
 
-    pub fn tick(&mut self) -> bool {
+    pub fn tick(&mut self) -> Result<bool> {
+        self.audio.check_output()?;
         if self.scrubbing.is_some() {
-            return self.prepare_scrub();
+            return Ok(self.prepare_scrub());
         }
         if let Some(playing) = &self.current
             && !self.preparing
@@ -1421,9 +1422,9 @@ impl Engine {
                 self.message = read_error
                     .unwrap_or_else(|| "The stream ended before the track finished".into());
             }
-            return true;
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
 
     pub fn queue_len(&self) -> usize {
@@ -1566,6 +1567,22 @@ mod tests {
         let mut track = track(id);
         track.batch.clear();
         track
+    }
+
+    #[test]
+    fn output_failure_reaches_the_main_loop_even_when_playback_is_paused() {
+        let log = Arc::new(Mutex::new(ServiceLog::default()));
+        let (mut engine, _, _) = Engine::new(Box::new(TestBackend(log))).unwrap();
+        engine.paused = true;
+        assert!(!engine.tick().unwrap());
+        engine.audio.fail_output();
+        assert!(
+            engine
+                .tick()
+                .unwrap_err()
+                .to_string()
+                .contains("Audio output failed")
+        );
     }
 
     #[test]
@@ -1919,11 +1936,14 @@ mod tests {
             .as_mut()
             .unwrap()
             .1 = Instant::now() - Duration::from_millis(100);
-        assert!(engine.tick());
+        assert!(engine.tick().unwrap());
         pump(&mut engine, &events, |engine| !engine.preparing);
         assert_eq!(engine.audio.sink.speed(), 4.0);
         engine.audio.sink.stop();
-        assert!(!engine.tick(), "A finished preview advanced the track");
+        assert!(
+            !engine.tick().unwrap(),
+            "A finished preview advanced the track"
+        );
         assert_eq!(engine.playback_id(), playback);
         // Finish while the final preview is still preparing, as a rapid mouse release does.
         engine

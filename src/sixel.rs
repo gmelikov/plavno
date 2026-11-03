@@ -1,3 +1,4 @@
+use crate::terminal_backend::DrawBuffer;
 use anyhow::{Context, Result, ensure};
 use crossterm::{
     cursor::{MoveTo, RestorePosition, SavePosition},
@@ -5,7 +6,7 @@ use crossterm::{
     terminal::{BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
 };
 use ratatui::{
-    backend::{Backend, CrosstermBackend},
+    backend::CrosstermBackend,
     buffer::{Buffer, CellDiffOption},
     layout::Rect,
 };
@@ -213,6 +214,7 @@ pub struct Presenter {
     mode: UpdateMode,
     previous: Option<Previous>,
     reset: bool,
+    underlay_buffer: DrawBuffer,
 }
 
 impl Presenter {
@@ -221,6 +223,7 @@ impl Presenter {
             mode,
             previous: None,
             reset: true,
+            underlay_buffer: DrawBuffer::default(),
         }
     }
 
@@ -304,8 +307,10 @@ impl Presenter {
                 for cell in &mut underlay.content {
                     cell.diff_option = CellDiffOption::AlwaysUpdate;
                 }
-                CrosstermBackend::new(&mut *writer)
-                    .draw(Buffer::empty(area).diff_iter(&underlay))?;
+                self.underlay_buffer.draw(
+                    &mut CrosstermBackend::new(&mut *writer),
+                    Buffer::empty(area).diff_iter(&underlay),
+                )?;
                 if let Some(patch) = image.as_ref().and_then(|image| image.crop(area, cell)) {
                     write_image(writer, &patch)?;
                 }
@@ -401,6 +406,8 @@ impl Drop for FrameGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal_backend::TerminalBackend;
+    use ratatui::backend::Backend;
 
     // Model transparent sixels layered over cell-based text erasure, as in foot.
     struct PixelTerminal {
@@ -542,7 +549,7 @@ mod tests {
                 terminal.pixels.fill(None);
             }
             let mut output = Vec::new();
-            CrosstermBackend::new(&mut output)
+            TerminalBackend::new(&mut output)
                 .draw(old.diff_iter(&buffer))
                 .unwrap();
             presenter

@@ -27,6 +27,7 @@ mod sixel;
 mod source_view;
 mod spring;
 mod stream;
+mod terminal_backend;
 mod terminal_input;
 mod text_selection;
 mod tui;

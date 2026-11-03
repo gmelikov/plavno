@@ -8,6 +8,7 @@ use crate::{
     flow_view::{self, FlowView},
     history_view::{Action, HistoryView},
     source_view::{self, SourceView},
+    terminal_backend::TerminalBackend,
     text_selection::{self, TextSelection},
     visualization::{Mode, Options, Renderer, Visualization},
     wave::FRAME_INTERVAL,
@@ -24,9 +25,10 @@ use crossterm::{
         MouseEventKind,
     },
     execute,
+    terminal::{EnterAlternateScreen, enable_raw_mode},
 };
 use ratatui::{
-    Frame,
+    Frame, Terminal,
     buffer::Buffer,
     layout::{Constraint, Flex, Layout, Rect},
     style::{Color, Style},
@@ -134,8 +136,15 @@ pub fn run(
         None
     };
     let mut sixel = crate::sixel::Presenter::new(options.sixel_update);
-    let mut terminal = ratatui::try_init()?;
+    let panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        ratatui::restore();
+        panic_hook(info);
+    }));
     let guard = TerminalGuard;
+    enable_raw_mode()?;
+    execute!(std::io::stdout(), EnterAlternateScreen)?;
+    let mut terminal = Terminal::new(TerminalBackend::new(std::io::stdout()))?;
     execute!(
         std::io::stdout(),
         EnableMouseCapture,
@@ -532,7 +541,7 @@ pub fn run(
         if !controls.is_seeking() {
             engine.end_scrub();
         }
-        dirty |= engine.tick();
+        dirty |= engine.tick()?;
         // UI/backend changes rebuild static content; the animation timer below
         // only schedules a new composite of the cached layers.
         if dirty {
