@@ -47,10 +47,14 @@ def picture(kind, color):
 
 front = picture(3, (20, 40, 60))
 back = picture(4, (200, 0, 0))
-for extension, source in [("flac", "silence.flac"), ("mp3", "silence.mp3"),
+for extension, source in [("mp3", "silence.mp3"),
                           ("m4a", "silence-flac.m4a")]:
     shutil.copyfile(ROOT / source, ROOT / f"tagged.{extension}")
 
+subprocess.run([
+    "sox", "-D", "-n", "-r", "44100", "-c", "1", "-b", "16",
+    str(ROOT / "tagged.flac"), "trim", "0", "30",
+], check=True)
 flac = FLAC(ROOT / "tagged.flac")
 flac["title"], flac["artist"], flac["genre"] = TITLE, ARTIST, GENRE
 flac.add_picture(back)

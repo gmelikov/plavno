@@ -30,7 +30,7 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     buffer::Buffer,
-    layout::{Constraint, Flex, Layout, Rect},
+    layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Style},
     text::Line,
     widgets::{Block, BorderType, Paragraph, Widget, Wrap},
@@ -206,7 +206,7 @@ pub fn run(
             controls.poll();
         }
         let artwork_changed = artwork.update(
-            if (visual_enabled && view.is_player())
+            if view.is_player()
                 || (cfg!(any(target_os = "macos", windows)) && media_controls.is_some())
             {
                 engine
@@ -719,25 +719,6 @@ fn build_scene(
     let identity_min = track_text
         .as_ref()
         .map_or(0, |(_, text)| if text.contains('\n') { 2 } else { 1 });
-    let identity_limit = frame
-        .area()
-        .height
-        .saturating_sub(4 + detail_rows + progress_rows + control_rows);
-    let identity_rows = if visual.is_none() {
-        track_text.as_ref().map_or(0, |(key, text)| {
-            selection.height(key, text, width, identity_limit)
-        })
-    } else {
-        0
-    };
-    let rows = Layout::vertical([if visual.is_some() {
-        Constraint::Min(0)
-    } else {
-        Constraint::Length(2 + identity_rows + detail_rows + progress_rows + control_rows)
-    }])
-    .flex(Flex::Start)
-    .margin(1)
-    .split(frame.area());
     let accent = Style::default().fg(Color::Cyan);
     let mut service = if engine.favorites_supported && engine.source != "mixed" {
         format!(
@@ -763,8 +744,9 @@ fn build_scene(
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .title(Line::from(format!(" plavno {} · {service} ", crate::VERSION)).style(accent));
-    let inner = pane.inner(rows[0]);
-    frame.render_widget(pane, rows[0]);
+    let pane_area = frame.area().inner(Margin::new(1, 1));
+    let inner = pane.inner(pane_area);
+    frame.render_widget(pane, pane_area);
     let content = Rect::new(
         inner.x.saturating_add(1),
         inner.y,
@@ -798,9 +780,7 @@ fn build_scene(
         identity.width,
         identity.bottom().saturating_sub(dance_top),
     );
-    if visual.is_some() {
-        artwork.render(inner, frame.buffer_mut());
-    }
+    artwork.render(inner, frame.buffer_mut());
     let cached = CachedFrame::begin(frame.buffer_mut());
     controls.draw_transport(
         frame,

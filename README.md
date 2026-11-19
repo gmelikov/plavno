@@ -22,7 +22,7 @@ A lightweight TUI player for Linux, macOS and Windows with music streams from po
 - **Mouse and hotkeys** — click controls, drag to seek, scroll for volume, and select track text to copy.
 - **Listening history** — search past plays by title or artist and replay tracks.
 - **RAM buffering and prefetch** — start playback while downloading; cache adjacent tracks for seeking and replay.
-- **Audio-reactive visuals** — an animated wave with album artwork, toggled with `v`.
+- **Album artwork and audio-reactive visuals** — `v` toggles animation over the album cover.
 
 ## Quick start
 
@@ -166,7 +166,7 @@ plavno --source local                   # Shuffle the saved directory, including
 plavno --directory /path/to/music       # Use a different directory for this run
 plavno --source mixed --directory ~/Music # Include local music in the mix
 plavno --file /path/to/track.flac        # Play a local file
-plavno --no-wave                        # Start without visualization
+plavno --no-wave                        # Start with album artwork and no animation
 ```
 
 ## Controls

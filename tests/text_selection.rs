@@ -15,6 +15,8 @@ struct Fixture {
     child: Child,
 }
 
+const PLAYER_ROWS: u16 = 24;
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -181,7 +183,7 @@ fn spawn_player_with_output_failure(
     let rows = if args.contains(&"--dance") || args.contains(&"--dance-style") {
         40
     } else {
-        24
+        PLAYER_ROWS
     };
     let mut size = libc::winsize {
         ws_row: rows,
@@ -734,24 +736,22 @@ fn tui_wave_toggle_restores_visualization_after_no_wave_startup() {
     let screen = screen_text(&output);
     assert!(!has_wave(&screen));
     assert_eq!(screen.matches("plavno").count(), 1);
-    let collapsed = pane_height(&screen).unwrap();
+    let full_height = Some(usize::from(PLAYER_ROWS) - 2);
+    assert_eq!(pane_height(&screen), full_height);
     assert!(output.windows(6).any(|w| w == b"Visual"));
     master.write_all(b"v").unwrap();
     read_until(&mut master, &mut output, |bytes| {
-        let screen = screen_text(bytes);
-        has_wave(&screen) && pane_height(&screen).is_some_and(|height| height > collapsed)
+        has_wave(&screen_text(bytes))
     });
-    let expanded = pane_height(&screen_text(&output)).unwrap();
-    assert!(expanded > collapsed);
+    assert_eq!(pane_height(&screen_text(&output)), full_height);
     click_label(&mut master, &mut output, "v Visual");
     read_until(&mut master, &mut output, |bytes| {
         let screen = screen_text(bytes);
-        !has_wave(&screen)
-            && pane_height(&screen).is_some_and(|height| height < expanded)
-            && screen.contains("Wave visualization disabled")
+        !has_wave(&screen) && screen.contains("Wave visualization disabled")
     });
-    assert_eq!(screen_text(&output).matches("plavno").count(), 1);
     let screen = screen_text(&output);
+    assert_eq!(screen.matches("plavno").count(), 1);
+    assert_eq!(pane_height(&screen), full_height);
     let notice = screen
         .lines()
         .position(|line| line.contains("Wave visualization disabled"))
@@ -781,6 +781,42 @@ fn tui_wave_toggle_restores_visualization_after_no_wave_startup() {
     assert!(line.trim_end().ends_with("Speed: 1.00x ]  · Queued: 0 │"));
     assert!(fixture.child.try_wait().unwrap().is_none());
     assert!(!screen_text(&output).contains("Starting"));
+}
+
+#[test]
+fn tui_keeps_full_height_album_artwork_when_visualization_is_disabled() {
+    let cover_track = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tagged.flac");
+    let (_fixture, mut master) = spawn_player(&["--no-wave", "--file", cover_track]);
+    let mut output = Vec::new();
+    read_until(&mut master, &mut output, |bytes| {
+        screen_text(bytes).contains("Playing")
+    });
+    master.write_all(b" ").unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        screen.contains("Paused") && screen.contains('▀')
+    });
+    let cover_row = usize::from(PLAYER_ROWS) / 2;
+    let screen = screen_text(&output);
+    assert!(!has_wave(&screen));
+    assert!(screen.lines().nth(cover_row).unwrap().contains('▀'));
+
+    master.write_all(b"v").unwrap();
+    read_until(&mut master, &mut output, |bytes| {
+        has_wave(&screen_text(bytes))
+    });
+    click_label(&mut master, &mut output, "v Visual");
+    read_until(&mut master, &mut output, |bytes| {
+        let screen = screen_text(bytes);
+        !has_wave(&screen) && screen.contains("Wave visualization disabled")
+    });
+    assert!(
+        screen_text(&output)
+            .lines()
+            .nth(cover_row)
+            .unwrap()
+            .contains('▀')
+    );
 }
 
 #[test]

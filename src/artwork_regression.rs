@@ -165,7 +165,7 @@ fn queued_request_after_change(next: Option<&str>, cached: bool) -> Option<Strin
 }
 
 #[test]
-fn hiding_visualization_discards_the_queued_cover_request() {
+fn clearing_the_cover_discards_the_queued_cover_request() {
     assert_eq!(queued_request_after_change(None, false), None);
 }
 
