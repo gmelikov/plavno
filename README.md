@@ -44,7 +44,7 @@ two executables together. Run `./plavno`, or add the directory to PATH.
 Download the `*-linux-x86_64-gnu.tar.gz` or `*-linux-aarch64-gnu.tar.gz` archive from
 [GitHub Releases](https://github.com/gmelikov/plavno/releases/latest). Extract it
 and keep `plavno` and `plavno-spotify` together. Run `./plavno`,
-or put all three in a directory on PATH, such as `~/.local/bin`.
+or put both executables in a directory on PATH, such as `~/.local/bin`.
 
 Requires glibc 2.35+, ALSA and D-Bus. Install the runtime packages for your distribution:
 
@@ -60,6 +60,27 @@ sudo pacman -S alsa-lib dbus
 Audio uses the ALSA default device; PipeWire/PulseAudio needs its ALSA plugin
 (for example `pipewire-alsa` or `pulseaudio-alsa` on Arch). A desktop D-Bus session
 enables media keys and Now Playing. Alpine/musl requires a separate source build.
+
+#### Install with Cargo
+
+Install a current stable Rust toolchain and the build packages for your distribution.
+
+```sh
+# Debian / Ubuntu
+sudo apt install build-essential pkg-config libasound2-dev libdbus-1-dev
+# Fedora
+sudo dnf install gcc pkgconf-pkg-config alsa-lib-devel dbus-devel
+# Arch Linux
+sudo pacman -S base-devel alsa-lib dbus
+```
+
+Then install the player from crates.io.
+
+```sh
+cargo install plavno --locked
+```
+
+For Spotify, [build the helper separately](docs/services.md#spotify-and-youtube-music).
 
 ### Windows
 
