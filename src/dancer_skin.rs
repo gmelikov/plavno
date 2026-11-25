@@ -1,4 +1,4 @@
-use super::{Point, Skeleton, Surface, Vec3};
+use super::{Skeleton, Surface, Vec3};
 use crate::dance_space::Capsule;
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -58,14 +58,7 @@ impl Surface {
     }
 }
 
-pub(super) fn render(
-    pose: &Skeleton,
-    width: usize,
-    height: usize,
-    origin: Point,
-    scale: f32,
-) -> Surface {
-    let mut surface = Surface::new(width, height, origin, scale);
+pub(super) fn paint_pose(surface: &mut Surface, pose: &Skeleton) {
     let chest = pose.shoulders[0].lerp(pose.shoulders[1], 0.5);
     let down = pose.waist.sub(chest).unit();
     let front = Vec3::new(0.0, 0.0, 1.0).yaw(pose.yaw);
@@ -224,7 +217,7 @@ pub(super) fn render(
         ),
     );
     for side in 0..2 {
-        let mut parts = pose.arm_parts(side, scale);
+        let mut parts = pose.arm_parts(side, surface.scale);
         surface.paint(JACKET, parts.next().unwrap());
         parts.next();
         let cuff = pose.elbows[side].lerp(pose.wrists[side], 0.72);
@@ -237,7 +230,6 @@ pub(super) fn render(
             surface.paint(SKIN, hand);
         }
     }
-    surface
 }
 
 pub(super) fn color(surface: &Surface, x: usize, y: usize) -> u8 {
@@ -271,6 +263,13 @@ pub(super) fn color(surface: &Surface, x: usize, y: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dance_motion::Point;
+
+    fn render(pose: &Skeleton, width: usize, height: usize, origin: Point, scale: f32) -> Surface {
+        let mut surface = Surface::new(width, height, origin, scale);
+        paint_pose(&mut surface, pose);
+        surface
+    }
     use crate::dance_motion::{Motion, Style};
 
     fn turned(pose: Skeleton, yaw: f32) -> Skeleton {

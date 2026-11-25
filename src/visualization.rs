@@ -78,7 +78,7 @@ impl Visualization {
     }
 
     pub fn sixel(
-        &self,
+        &mut self,
         area: Rect,
         cell: crate::sixel::CellSize,
         buffer: &Buffer,
@@ -86,6 +86,10 @@ impl Visualization {
         let mut image = self.dancer.sixel(area, cell, self.skin)?;
         image.protect_text(buffer, cell);
         Some(image)
+    }
+
+    pub fn release_sixel_buffers(&mut self) {
+        self.dancer.release_sixel_buffers();
     }
 }
 

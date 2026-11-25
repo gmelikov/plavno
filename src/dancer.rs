@@ -29,6 +29,13 @@ pub struct Dancer {
     was_playing: bool,
     genre: Genre,
     genre_playback: Option<(u64, u64)>,
+    sixel_buffers: SixelBuffers,
+}
+
+#[derive(Default)]
+struct SixelBuffers {
+    surface: Surface,
+    trails: [Dots; 2],
 }
 
 fn follow(value: &mut f32, target: f32, dt: f32, attack: f32, release: f32) {
@@ -57,6 +64,7 @@ impl Dancer {
             was_playing: false,
             genre: Genre::Unknown,
             genre_playback: None,
+            sixel_buffers: SixelBuffers::default(),
         }
     }
 
@@ -250,7 +258,7 @@ impl Dancer {
     }
 
     pub fn sixel(
-        &self,
+        &mut self,
         area: Rect,
         cell: crate::sixel::CellSize,
         skin: skin::Skin,
@@ -313,22 +321,19 @@ impl Dancer {
             -f32::from(x0) * f32::from(cell.width),
             -f32::from(y0) * f32::from(cell.height),
         );
-        let surface = match skin {
-            skin::Skin::Detailed => {
-                skin::render(&self.motion.spatial.pose, width, height, origin, scale)
-            }
-            skin::Skin::Silhouette => {
-                Surface::render(&self.motion.spatial.pose, width, height, origin, scale)
-            }
-        };
+        let SixelBuffers { surface, trails } = &mut self.sixel_buffers;
+        surface.reset(width, height, origin, scale);
+        match skin {
+            skin::Skin::Detailed => skin::paint_pose(surface, &self.motion.spatial.pose),
+            skin::Skin::Silhouette => surface.paint_pose(&self.motion.spatial.pose),
+        }
         let mut pixels = vec![0; width * height];
-        let trails = [8, 4].map(|age| {
-            let mut trail = Dots::new(width, height);
+        for (trail, age) in trails.iter_mut().zip([8, 4]) {
+            trail.reset(width, height);
             if let Some(pose) = self.history.get(self.history.len().saturating_sub(age)) {
-                pose.draw(&mut trail, origin, scale, false);
+                pose.draw(trail, origin, scale, false);
             }
-            trail
-        });
+        }
         let edge = (scale * 0.012).ceil().max(1.0) as usize;
         for y in 0..height {
             for x in 0..width {
@@ -344,7 +349,7 @@ impl Dancer {
                     continue;
                 }
                 pixels[y * width + x] = if skin == skin::Skin::Detailed {
-                    skin::color(&surface, x, y)
+                    skin::color(surface, x, y)
                 } else if sample.tint >= 0.0 {
                     if sample.tint > 0.5 { 6 } else { 7 }
                 } else if x < edge
@@ -402,6 +407,10 @@ impl Dancer {
         })
     }
 
+    pub fn release_sixel_buffers(&mut self) {
+        self.sixel_buffers = SixelBuffers::default();
+    }
+
     fn compose(layers: &[Dots; 7], colors: &[Color; 7], index: usize) -> Option<(u8, Color)> {
         let body = layers[2].cells[index];
         if body != 0 {
@@ -438,6 +447,7 @@ struct SurfaceDot {
     material: u8,
 }
 
+#[derive(Default)]
 struct Surface {
     dots: Vec<SurfaceDot>,
     width: usize,
@@ -450,39 +460,48 @@ struct Surface {
 
 impl Surface {
     fn new(width: usize, height: usize, origin: Point, scale: f32) -> Self {
-        Self {
-            dots: vec![
-                SurfaceDot {
-                    depth: f32::NEG_INFINITY,
-                    tint: -1.0,
-                    material: 0,
-                };
-                width * height
-            ],
-            width,
-            height,
-            origin,
-            scale,
-            chest_depth: 0.0,
-            material: 0,
-        }
+        let mut surface = Self::default();
+        surface.reset(width, height, origin, scale);
+        surface
+    }
+
+    fn reset(&mut self, width: usize, height: usize, origin: Point, scale: f32) {
+        self.width = width;
+        self.height = height;
+        self.origin = origin;
+        self.scale = scale;
+        self.chest_depth = 0.0;
+        self.material = 0;
+        self.dots.clear();
+        self.dots.resize(
+            width * height,
+            SurfaceDot {
+                depth: f32::NEG_INFINITY,
+                tint: -1.0,
+                material: 0,
+            },
+        );
     }
 
     fn render(pose: &Skeleton, width: usize, height: usize, origin: Point, scale: f32) -> Self {
         let mut surface = Self::new(width, height, origin, scale);
-        surface.chest_depth = pose.shoulders[0].lerp(pose.shoulders[1], 0.5).z;
+        surface.paint_pose(pose);
+        surface
+    }
+
+    fn paint_pose(&mut self, pose: &Skeleton) {
+        self.chest_depth = pose.shoulders[0].lerp(pose.shoulders[1], 0.5).z;
         for part in pose.body_parts() {
-            surface.capsule(part.start, part.end, part.radii, false);
+            self.capsule(part.start, part.end, part.radii, false);
         }
-        surface.head(pose.head, pose.head_width(), pose.head_roll);
+        self.head(pose.head, pose.head_width(), pose.head_roll);
         let nose = pose.nose();
-        surface.capsule(nose.start, nose.end, nose.radii, false);
+        self.capsule(nose.start, nose.end, nose.radii, false);
         for index in 0..2 {
-            for part in pose.arm_parts(index, scale) {
-                surface.capsule(part.start, part.end, part.radii, true);
+            for part in pose.arm_parts(index, self.scale) {
+                self.capsule(part.start, part.end, part.radii, true);
             }
         }
-        surface
     }
 
     fn screen(&self, point: Vec3) -> Vec3 {
@@ -643,6 +662,7 @@ impl Skeleton {
     }
 }
 
+#[derive(Default)]
 struct Dots {
     width: usize,
     height: usize,
@@ -673,11 +693,16 @@ impl Dots {
     }
 
     fn new(width: usize, height: usize) -> Self {
-        Self {
-            width,
-            height,
-            cells: vec![0; width.div_ceil(2) * height.div_ceil(4)],
-        }
+        let mut dots = Self::default();
+        dots.reset(width, height);
+        dots
+    }
+
+    fn reset(&mut self, width: usize, height: usize) {
+        self.width = width;
+        self.height = height;
+        self.cells.clear();
+        self.cells.resize(width.div_ceil(2) * height.div_ceil(4), 0);
     }
 
     fn dot(&mut self, x: usize, y: usize) {
@@ -820,7 +845,11 @@ mod tests {
             }
             let pose = dancer.motion.spatial.pose;
             let detailed = dancer.sixel(area, cell, skin::Skin::Detailed).unwrap();
+            let surface = dancer.sixel_buffers.surface.dots.as_ptr();
+            let trail = dancer.sixel_buffers.trails[0].cells.as_ptr();
             let silhouette = dancer.sixel(area, cell, skin::Skin::Silhouette).unwrap();
+            assert_eq!(dancer.sixel_buffers.surface.dots.as_ptr(), surface);
+            assert_eq!(dancer.sixel_buffers.trails[0].cells.as_ptr(), trail);
             assert_eq!(detailed.area, silhouette.area);
             assert_eq!(dancer.motion.spatial.pose, pose);
             assert!(

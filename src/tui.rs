@@ -271,11 +271,14 @@ pub fn run(
                     );
                 }
             })?;
-            let image = dance_area.and_then(|area| {
-                visible_visual
+            let image = if graphics {
+                dance_area
                     .zip(cell_size)
-                    .and_then(|(visual, cell)| visual.sixel(area, cell, completed.buffer))
-            });
+                    .and_then(|(area, cell)| visual.sixel(area, cell, completed.buffer))
+            } else {
+                visual.release_sixel_buffers();
+                None
+            };
             if let Some(sync) = &mut sync {
                 sync.present(&mut sixel, image, completed.buffer, cell_size.unwrap())?;
             }
@@ -324,6 +327,7 @@ pub fn run(
             Ok(Event::Terminal(event::Event::Resize(_, _))) => {
                 if cell_size.is_some() {
                     cell_size = Some(crate::sixel::CellSize::read()?);
+                    visual.release_sixel_buffers();
                     sixel.invalidate();
                 }
                 controls.reset();

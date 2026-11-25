@@ -141,8 +141,20 @@ impl Image {
         }
     }
 
+    #[cfg(test)]
     pub fn encode(&self) -> Vec<u8> {
-        let mut output = Vec::new();
+        let mut buffers = EncoderBuffers::default();
+        self.encode_into(&mut buffers);
+        buffers.output
+    }
+
+    fn encode_into(&self, buffers: &mut EncoderBuffers) {
+        let EncoderBuffers {
+            output,
+            planes,
+            ends,
+        } = buffers;
+        output.clear();
         // Square pixels, transparent background, explicit raster bounds.
         write!(output, "\x1bP7;1;0q\"1;1;{};{}", self.width, self.height).unwrap();
         for (index, rgb) in self.palette.iter().enumerate().skip(1) {
@@ -150,8 +162,8 @@ impl Image {
             write!(output, "#{index};2;{r};{g};{b}").unwrap();
         }
         let colors = self.palette.len() - 1;
-        let mut planes = vec![0_u8; self.width * colors];
-        let mut ends = vec![0; colors];
+        planes.resize(self.width * colors, 0);
+        ends.resize(colors, 0);
         for band in (0..self.height).step_by(6) {
             planes.fill(0);
             ends.fill(0);
@@ -201,8 +213,14 @@ impl Image {
             }
         }
         output.extend_from_slice(b"\x1b\\");
-        output
     }
+}
+
+#[derive(Default)]
+struct EncoderBuffers {
+    output: Vec<u8>,
+    planes: Vec<u8>,
+    ends: Vec<usize>,
 }
 
 struct Previous {
@@ -215,6 +233,7 @@ pub struct Presenter {
     previous: Option<Previous>,
     reset: bool,
     underlay_buffer: DrawBuffer,
+    encoder: EncoderBuffers,
 }
 
 impl Presenter {
@@ -224,6 +243,7 @@ impl Presenter {
             previous: None,
             reset: true,
             underlay_buffer: DrawBuffer::default(),
+            encoder: EncoderBuffers::default(),
         }
     }
 
@@ -233,6 +253,7 @@ impl Presenter {
 
     pub fn invalidate(&mut self) {
         self.reset = true;
+        self.encoder = EncoderBuffers::default();
     }
 
     pub fn full_redraw(&self) -> bool {
@@ -296,7 +317,7 @@ impl Presenter {
     ) -> io::Result<()> {
         if self.full_redraw() {
             if let Some(image) = &image {
-                write_image(writer, image)?;
+                write_image(writer, image, &mut self.encoder)?;
             }
         } else {
             let area = self.changed_area(image.as_ref(), buffer, cell);
@@ -312,11 +333,14 @@ impl Presenter {
                     Buffer::empty(area).diff_iter(&underlay),
                 )?;
                 if let Some(patch) = image.as_ref().and_then(|image| image.crop(area, cell)) {
-                    write_image(writer, &patch)?;
+                    write_image(writer, &patch, &mut self.encoder)?;
                 }
             }
         }
         writer.flush()?;
+        if image.is_none() {
+            self.encoder = EncoderBuffers::default();
+        }
         self.previous = image.map(|image| Previous {
             underlay: copy_area(buffer, image.area),
             image,
@@ -362,9 +386,14 @@ fn expand_wide(mut area: Rect, buffer: &Buffer) -> Rect {
     area
 }
 
-fn write_image(writer: &mut impl Write, image: &Image) -> io::Result<()> {
+fn write_image(
+    writer: &mut impl Write,
+    image: &Image,
+    buffers: &mut EncoderBuffers,
+) -> io::Result<()> {
     execute!(writer, MoveTo(image.area.x, image.area.y))?;
-    writer.write_all(&image.encode())
+    image.encode_into(buffers);
+    writer.write_all(&buffers.output)
 }
 
 // Keep text and graphics in one synchronized update in either presentation mode.
