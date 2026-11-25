@@ -67,9 +67,11 @@ pub struct Skeleton {
     pub shoulders: [Vec3; 2],
     pub elbows: [Vec3; 2],
     pub wrists: [Vec3; 2],
+    pub wrist_bend: [f32; 2],
     pub hips: [Vec3; 2],
     pub knees: [Vec3; 2],
     pub ankles: [Vec3; 2],
+    pub heels: [Vec3; 2],
     pub toes: [Vec3; 2],
     pub tail: [Vec3; 4],
     pub yaw: f32,
@@ -89,6 +91,7 @@ impl Skeleton {
             .chain(self.hips)
             .chain(self.knees)
             .chain(self.ankles)
+            .chain(self.heels)
             .chain(self.toes)
             .chain(self.tail)
     }
@@ -98,10 +101,10 @@ impl Skeleton {
         [
             Capsule::new(self.hips[0], self.knees[0], [0.055, 0.037]),
             Capsule::new(self.knees[0], self.ankles[0], [0.037, 0.017]),
-            Capsule::new(self.ankles[0], self.toes[0], [0.017, 0.014]),
+            Capsule::new(self.heels[0], self.toes[0], [0.017, 0.014]),
             Capsule::new(self.hips[1], self.knees[1], [0.055, 0.037]),
             Capsule::new(self.knees[1], self.ankles[1], [0.037, 0.017]),
-            Capsule::new(self.ankles[1], self.toes[1], [0.017, 0.014]),
+            Capsule::new(self.heels[1], self.toes[1], [0.017, 0.014]),
             Capsule::new(
                 self.shoulders[0].lerp(self.shoulders[1], 0.5),
                 self.waist,
@@ -130,8 +133,12 @@ impl Skeleton {
 
     pub fn arm_parts(&self, index: usize, scale: f32) -> impl Iterator<Item = Capsule> {
         let wrist = self.wrists[index];
-        let direction = wrist.sub(self.elbows[index]).unit();
+        let forearm = wrist.sub(self.elbows[index]).unit();
         let side = if index == 0 { -1.0 } else { 1.0 };
+        let across = Vec3::new(side * 0.45, 0.3, 1.0).yaw(self.yaw);
+        let across = across.sub(forearm.scale(across.dot(forearm))).unit();
+        let (sin, cos) = self.wrist_bend[index].sin_cos();
+        let direction = forearm.scale(cos).add(across.scale(sin)).unit();
         [
             Capsule::new(self.shoulders[index], self.elbows[index], [0.036, 0.027]),
             Capsule::new(self.elbows[index], wrist, [0.028, 0.018]),
@@ -207,10 +214,14 @@ struct Angular {
 
 impl Angular {
     fn follow(&mut self, target: f32, dt: f32) {
+        self.follow_at(target, 3.0, 0.9, dt);
+    }
+
+    fn follow_at(&mut self, target: f32, omega: f32, speed: f32, dt: f32) {
         let (next, velocity) =
-            crate::spring::advance(self.position, self.velocity, target, 3.0, dt);
+            crate::spring::advance(self.position, self.velocity, target, omega, dt);
         self.velocity = velocity;
-        self.position += (next - self.position).clamp(-dt * 0.9, dt * 0.9);
+        self.position += (next - self.position).clamp(-dt * speed, dt * speed);
     }
 }
 
@@ -222,20 +233,54 @@ pub struct Cue {
     pub airborne: bool,
     pub swing: Option<(usize, f32)>,
     pub sliding: bool,
+    pub turn: f32,
+    pub look: f32,
+    pub lumbar: f32,
+    pub twist: f32,
+    pub pitch: f32,
+    pub depth: f32,
+    pub foot_roll: [f32; 2],
+    pub foot_target: Option<(f32, f32)>,
+}
+
+fn foot_points(base: Vec3, yaw: f32, roll: f32) -> [Vec3; 3] {
+    let heel = Vec3::new(0.0, 0.012, -0.025);
+    let toe = Vec3::new(0.0, 0.012, 0.055);
+    let pivot = if roll >= 0.0 { toe } else { heel };
+    [Vec3::default(), heel, toe].map(|point| {
+        let point = if roll == 0.0 {
+            point
+        } else {
+            pivot.add(point.sub(pivot).pitch(-roll))
+        };
+        base.add(point.yaw(yaw))
+    })
+}
+
+struct FootSwing {
+    foot: usize,
+    depth: [f32; 2],
+    yaw: [f32; 2],
 }
 
 #[derive(Default)]
 pub struct Rig {
     pub pose: Skeleton,
     pelvis: Angular,
+    lumbar: Angular,
     torso: Angular,
     head: Angular,
     pitch: Angular,
     depth_drive: Angular,
     phase: f32,
     foot_depth: [f32; 2],
-    swing: Option<(usize, f32, f32)>,
+    foot_yaw: [f32; 2],
+    foot_roll: [Angular; 2],
+    swing: Option<FootSwing>,
     arms: [Arm; 2],
+    wrists: [Angular; 2],
+    hair_yaw: Angular,
+    hair_roll: Angular,
 }
 
 impl Rig {
@@ -259,40 +304,69 @@ impl Rig {
         self.depth_drive.follow(cue.energy * recovery, dt);
         // Weight transfer leads the pelvis; the shoulder girdle counters it and
         // follows asymmetric reaches instead of turning the whole body as one block.
-        self.pelvis.follow(
-            (turn * (1.0 - travel.abs()) + travel * 1.2 + weight * cue.energy * 0.4) * recovery,
-            dt,
-        );
+        let pivot = cue.turn.abs().min(1.0);
+        let facing = (turn * (1.0 - travel.abs()) + travel * 1.2 + weight * cue.energy * 0.4)
+            * (1.0 - pivot)
+            + cue.turn;
+        self.pelvis
+            .follow_at(facing * recovery, 3.0 + 6.0 * pivot, 0.9 + 2.7 * pivot, dt);
         let twist = ((self.phase + 0.8).sin() * 0.3 + reach * 0.18 - weight * 0.5)
             .clamp(-0.65, 0.65)
             * cue.energy;
-        self.torso
-            .follow((self.pelvis.position + twist) * recovery, dt);
-        self.head.follow(
-            self.torso.position + (self.phase - 0.8).sin() * cue.energy * 0.22,
+        self.torso.follow_at(
+            (self.pelvis.position + twist * (1.0 - pivot * 0.55) + cue.twist) * recovery,
+            3.0 + 5.0 * pivot,
+            0.9 + 2.3 * pivot,
             dt,
         );
-        self.pitch
-            .follow((self.phase * 2.0).sin() * cue.energy * 0.12 * recovery, dt);
+        let look = cue.look + travel * 0.18 + (facing - self.torso.position) * pivot * 0.32;
+        let head_target =
+            self.torso.position + (look + (self.phase - 0.8).sin() * cue.energy * 0.12) * recovery;
+        self.head
+            .follow_at(head_target.clamp(-1.5, 1.5), 5.5, 2.3, dt);
+        self.pitch.follow_at(
+            ((self.phase * 2.0).sin() * cue.energy * 0.12 + cue.pitch) * recovery,
+            5.0,
+            1.5,
+            dt,
+        );
+        let lumbar = (weight * 0.17 * cue.energy + cue.lumbar).clamp(-0.26, 0.26);
+        self.lumbar.follow_at(lumbar * recovery, 7.5, 1.7, dt);
 
         if !cue.airborne {
             if let Some((foot, progress)) = cue.swing {
-                if self.swing.is_none_or(|(previous, _, _)| previous != foot) {
+                if self.swing.as_ref().is_none_or(|swing| swing.foot != foot) {
+                    if let Some(previous) = self.swing.take() {
+                        self.foot_depth[previous.foot] = previous.depth[1];
+                        self.foot_yaw[previous.foot] = previous.yaw[1];
+                    }
                     let side = if foot == 0 { -1.0 } else { 1.0 };
-                    let target = -side * self.pelvis.position.sin() * 0.075;
-                    self.swing = Some((foot, self.foot_depth[foot], target));
+                    let (depth, yaw) = cue.foot_target.unwrap_or((
+                        -side * self.pelvis.position.sin() * 0.075,
+                        self.pelvis.position,
+                    ));
+                    self.swing = Some(FootSwing {
+                        foot,
+                        depth: [self.foot_depth[foot], depth],
+                        yaw: [self.foot_yaw[foot], yaw],
+                    });
                 }
-                if let Some((foot, start, target)) = self.swing {
-                    self.foot_depth[foot] = if progress >= 1.0 {
-                        target
-                    } else if planar.ankles[foot].y == 0.97 && !cue.sliding {
-                        if progress < 0.5 { start } else { target }
-                    } else {
-                        start + (target - start) * crate::choreography::ease(progress)
-                    };
-                }
-            } else if let Some((foot, _, target)) = self.swing.take() {
-                self.foot_depth[foot] = target;
+                let swing = self.swing.as_ref().unwrap();
+                let position = if planar.ankles[foot].y == 0.97 && !cue.sliding {
+                    f32::from(progress >= 0.5)
+                } else {
+                    crate::choreography::ease(progress)
+                };
+                let interpolate = |[from, to]: [f32; 2]| match position {
+                    0.0 => from,
+                    1.0 => to,
+                    _ => from + (to - from) * position,
+                };
+                self.foot_depth[foot] = interpolate(swing.depth);
+                self.foot_yaw[foot] = interpolate(swing.yaw);
+            } else if let Some(swing) = self.swing.take() {
+                self.foot_depth[swing.foot] = swing.depth[1];
+                self.foot_yaw[swing.foot] = swing.yaw[1];
             }
         }
         let roll = (chest2.x - hip2.x).atan2(hip2.y - chest2.y);
@@ -301,15 +375,23 @@ impl Rig {
                 .pitch(self.pitch.position)
                 .roll(roll)
         };
-        let depth = (self.foot_depth[0] + self.foot_depth[1]) * 0.5;
+        let depth = (self.foot_depth[0] + self.foot_depth[1]) * 0.5 + cue.depth * 0.45;
         let mut hip = Vec3::new(hip2.x, hip2.y, depth);
         let hip_offsets = std::array::from_fn::<_, 2, _>(|i| {
             Vec3::new(planar.hips[i].x - hip2.x, planar.hips[i].y - hip2.y, 0.0)
                 .yaw(self.pelvis.position)
         });
-        let ankles = std::array::from_fn(|i| {
-            Vec3::new(planar.ankles[i].x, planar.ankles[i].y, self.foot_depth[i])
+        let feet = std::array::from_fn::<_, 2, _>(|i| {
+            let base = Vec3::new(planar.ankles[i].x, planar.ankles[i].y, self.foot_depth[i]);
+            let target = cue.foot_roll[i] * recovery;
+            let flex = &mut self.foot_roll[i];
+            flex.follow_at(target, 18.0, 5.0, dt);
+            if target == 0.0 && flex.position.abs() < 0.0001 && flex.velocity.abs() < 0.001 {
+                *flex = Angular::default();
+            }
+            foot_points(base, self.foot_yaw[i], flex.position)
         });
+        let ankles = feet.map(|[ankle, _, _]| ankle);
         // Solve height against both 3D contacts before solving knees; yaw cannot stretch legs.
         for i in 0..2 {
             let horizontal = (hip.x + hip_offsets[i].x - ankles[i].x).powi(2)
@@ -318,7 +400,12 @@ impl Rig {
                 ankles[i].y - (0.449_f32.powi(2) - horizontal).max(0.0).sqrt() - hip_offsets[i].y;
             hip.y = hip.y.max(minimum);
         }
-        let chest = hip.add(frame(Vec3::new(0.0, -0.27, 0.0)));
+        let waist = hip.add(
+            Vec3::new(0.0, -0.0972, 0.0)
+                .pitch(self.pitch.position)
+                .roll(roll + self.lumbar.position),
+        );
+        let chest = waist.add(frame(Vec3::new(0.0, -0.1728, 0.0)));
         let head_roll = (planar.head.x - chest2.x).atan2(chest2.y - planar.head.y) - roll;
         let head = chest.add(
             Vec3::new(0.0, -0.102, 0.0)
@@ -329,9 +416,11 @@ impl Rig {
         let mut pose = Skeleton {
             head,
             neck: chest.add(frame(Vec3::new(0.0, -0.022, 0.0))),
-            waist: hip.lerp(chest, 0.36),
+            waist,
             hips: hip_offsets.map(|offset| hip.add(offset)),
             ankles,
+            heels: feet.map(|[_, heel, _]| heel),
+            toes: feet.map(|[_, _, toe]| toe),
             yaw: self.torso.position,
             hip_yaw: self.pelvis.position,
             head_yaw: self.head.position,
@@ -346,8 +435,6 @@ impl Rig {
             let knee_pole = Vec3::new(0.02, 0.0, 1.0).yaw(self.pelvis.position);
             let (knee, _) = chain(pose.hips[i], pose.ankles[i], knee_pole, 0.22, 0.23);
             pose.knees[i] = knee;
-            pose.toes[i] =
-                pose.ankles[i].add(Vec3::new(0.0, 0.012, 0.055).yaw(self.pelvis.position));
         }
         let parts = pose.body_capsules();
         let body = Body { parts: &parts };
@@ -370,14 +457,46 @@ impl Rig {
                 &body,
                 dt,
             );
+            let current = pose.wrists[i].sub(pose.shoulders[i]);
+            let previous = self.pose.wrists[i].sub(self.pose.shoulders[i]);
+            let inertia = if dt > 0.0 {
+                let delta = current.sub(previous);
+                -(delta.y * 0.30 + delta.x * side * 0.22) / dt
+            } else {
+                0.0
+            };
+            self.wrists[i].follow_at(
+                ((0.13 * cue.energy + inertia) * recovery).clamp(-0.46, 0.46),
+                10.0,
+                3.2,
+                dt,
+            );
+            pose.wrist_bend[i] = self.wrists[i].position;
         }
-        pose.tail = [
-            Vec3::new(0.0, -0.035, -0.045),
-            Vec3::new(0.0, 0.0, -0.095),
-            Vec3::new(self.phase.sin() * 0.018, 0.045, -0.11),
-            Vec3::new(self.phase.sin() * 0.025, 0.095, -0.12),
-        ]
-        .map(|point| pose.head_point(point));
+        if dt > 0.0 {
+            let yaw = -(pose.head_yaw - self.pose.head_yaw) * 0.32 / dt;
+            let roll = -(pose.head.x - self.pose.head.x) * 0.85 / dt;
+            self.hair_yaw
+                .follow_at(yaw.clamp(-0.75, 0.75), 8.0, 4.0, dt);
+            self.hair_roll
+                .follow_at(roll.clamp(-0.65, 0.65), 8.0, 4.0, dt);
+        }
+        let tie = Vec3::new(0.0, -0.035, -0.045);
+        pose.tail = std::array::from_fn(|i| {
+            let flex = i as f32 / 3.0;
+            let offset = Vec3::new(
+                0.0,
+                [0.0, 0.035, 0.08, 0.13][i],
+                [0.0, -0.05, -0.065, -0.075][i],
+            );
+            pose.head_point(
+                tie.add(
+                    offset
+                        .yaw(self.hair_yaw.position * flex)
+                        .roll(self.hair_roll.position * flex),
+                ),
+            )
+        });
         self.pose = pose;
     }
 }
@@ -628,6 +747,21 @@ impl Limb {
 mod tests {
     use super::*;
     use crate::dance_motion::{Motion, Style};
+
+    #[test]
+    fn shoe_roll_lifts_the_unloaded_end_around_a_fixed_contact() {
+        for yaw in [-1.0, 0.0, 1.0] {
+            let base = Vec3::new(0.25, 0.97, -0.11);
+            let [ankle, heel, toe] = foot_points(base, yaw, 0.0);
+            let [raised_ankle, raised_heel, fixed_toe] = foot_points(base, yaw, 0.5);
+            assert_eq!(fixed_toe, toe);
+            assert!(raised_heel.y < heel.y - 0.03);
+            assert!(raised_ankle.y < ankle.y);
+            let [_, fixed_heel, raised_toe] = foot_points(base, yaw, -0.4);
+            assert_eq!(fixed_heel, heel);
+            assert!(raised_toe.y < toe.y - 0.025);
+        }
+    }
 
     #[test]
     fn weight_transfers_and_reaches_twist_hips_and_shoulders_independently() {

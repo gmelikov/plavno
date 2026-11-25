@@ -1501,26 +1501,23 @@ impl Engine {
     }
 
     pub fn levels(&self) -> Levels {
-        if self.paused && !self.is_scrubbing()
-            || self.preparing
-            || self.buffering()
-            || self.current.is_none()
-        {
-            return Levels::default();
-        }
-        let mut levels = Levels::unpack(
-            self.current
-                .as_ref()
-                .unwrap()
-                .progress
-                .levels
-                .load(Ordering::Relaxed),
-        );
+        let mut levels = self.source_levels();
         levels.rms *= self.volume;
         levels.bass *= self.volume;
         levels.peak *= self.volume;
         levels.pulse *= self.volume;
         levels
+    }
+
+    pub fn source_levels(&self) -> Levels {
+        if self.paused && !self.is_scrubbing() || self.preparing || self.buffering() {
+            return Levels::default();
+        }
+        self.current
+            .as_ref()
+            .map_or_else(Levels::default, |playing| {
+                Levels::unpack(playing.progress.levels.load(Ordering::Relaxed))
+            })
     }
 
     pub fn shutdown(&mut self) -> Receiver<()> {
@@ -1583,6 +1580,26 @@ mod tests {
                 .to_string()
                 .contains("Audio output failed")
         );
+    }
+
+    #[test]
+    fn dance_source_levels_survive_volume_changes_and_freeze_on_pause() {
+        let log = Arc::new(Mutex::new(ServiceLog::default()));
+        let (mut engine, _, events) = Engine::new(Box::new(TestBackend(log))).unwrap();
+        engine.paused = true;
+        engine.start();
+        pump(&mut engine, &events, |engine| engine.current.is_some());
+        let playing = engine.current.as_ref().unwrap();
+        // The audio sink stays paused so it cannot overwrite the synthetic meter.
+        playing.progress.levels.store(u64::MAX, Ordering::Relaxed);
+        assert_eq!(engine.source_levels().pulse, 0.0);
+        engine.paused = false;
+        engine.control(Command::Volume(0.2));
+        assert_eq!(engine.source_levels().pulse, 1.0);
+        assert_eq!(engine.levels().pulse, 0.2);
+        engine.control(Command::Volume(0.0));
+        assert_eq!(engine.source_levels().pulse, 1.0);
+        assert_eq!(engine.levels().pulse, 0.0);
     }
 
     #[test]

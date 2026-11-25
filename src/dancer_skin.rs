@@ -72,27 +72,29 @@ pub(super) fn render(
     let body = pose.body_capsules();
 
     for side in 0..2 {
-        let (hip, knee, ankle, toe) = (
+        let (hip, knee, ankle, heel, toe) = (
             pose.hips[side],
             pose.knees[side],
             pose.ankles[side],
+            pose.heels[side],
             pose.toes[side],
         );
         surface.paint(PANTS, Capsule::new(hip, knee, [0.058, 0.041]));
         let cuff = knee.lerp(ankle, 0.82);
         surface.paint(PANTS, Capsule::new(knee, cuff, [0.041, 0.025]));
         surface.paint(SKIN, Capsule::new(cuff, ankle, [0.019, 0.017]));
-        surface.paint(CYAN, Capsule::new(ankle, toe, [0.028, 0.025]));
-        let sole = Vec3::new(0.0, 0.021, 0.0);
+        surface.paint(CYAN, Capsule::new(heel, toe, [0.026, 0.025]));
+        let up = ankle.sub(heel.lerp(toe, 0.3125)).unit();
+        let sole = up.scale(-0.014);
         surface.paint(
             WHITE,
-            Capsule::new(ankle.add(sole), toe.add(sole), [0.010; 2]),
+            Capsule::new(heel.add(sole), toe.add(sole), [0.010; 2]),
         );
         surface.paint(
             WHITE,
             Capsule::new(
-                ankle.lerp(toe, 0.25).add(Vec3::new(0.0, -0.012, 0.019)),
-                ankle.lerp(toe, 0.65).add(Vec3::new(0.0, -0.010, 0.019)),
+                heel.lerp(toe, 0.42).add(up.scale(0.023)),
+                heel.lerp(toe, 0.78).add(up.scale(0.023)),
                 [0.007; 2],
             ),
         );
@@ -284,6 +286,7 @@ mod tests {
             hips: pose.hips.map(turn),
             knees: pose.knees.map(turn),
             ankles: pose.ankles.map(turn),
+            heels: pose.heels.map(turn),
             toes: pose.toes.map(turn),
             tail: pose.tail.map(turn),
             yaw: pose.yaw + yaw,

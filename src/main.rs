@@ -7,6 +7,7 @@ mod choreography;
 mod config;
 mod controls;
 mod dance_balance;
+mod dance_clips;
 mod dance_motion;
 mod dance_space;
 mod dancer;

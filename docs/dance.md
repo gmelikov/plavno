@@ -66,6 +66,12 @@ unfinished step. Existing track-transition and body constraints still apply.
 The frontal hakken interpretation uses alternating lifts and small heel-toe accents;
 it does not reproduce the tutorial's full backward slide or authored kicks.
 
+At moderate, steady tempos the Groove mixture can also select two short
+contemporary dance recordings. The player retimes each excerpt to eight counts,
+favors the quieter recording at lower energy, and mirrors the first step away
+from the loaded foot when there is room. The existing balance and contact solver
+adapts the recorded trajectories to the current stance and the terminal stage.
+
 The prototype separates audio features, choreography, the body rig, and drawing:
 
 - `dancer.rs` follows energy, bass, transients, onset intervals, and their
@@ -81,6 +87,10 @@ The prototype separates audio features, choreography, the body rig, and drawing:
   Stage travel keeps longer phrases so the shorter club motifs leave room to walk.
   Its duration also allows enough contacts to cover the distance; high tempos do
   not compress a long walk into an impossibly short phrase.
+  At moderate tempos, Groove and House can use an eight-count step turn. It starts
+  with softened knees and a side step into an asymmetric diagonal reach, then
+  takes two low steps into the turn and settles. On a steady beat, the preparation
+  can align to an onset before the first step.
 - `dance_motion.rs` blends movement profiles over several seconds. Flow uses an
   independent, sustained phrase clock. Footwork is selected once per contact cycle:
   planted weight shifts, unloaded floor drags, low skimming steps, or explicit lifts.
@@ -90,7 +100,8 @@ The prototype separates audio features, choreography, the body rig, and drawing:
   Contacts have a minimum cycle time. At very high tempos, strides and lifts shrink
   rather than replaying the same poses faster.
   Strong moderate-tempo music can also reach Pulse; tempo alone does not decide it.
-- Detected onsets inject velocity into the body bounce and torso lean. Each onset
+- The dancer follows audio levels before playback volume is applied. Detected
+  onsets inject velocity into the body bounce and torso lean. Each onset
   samples movement strength and direction once; there is no per-frame random jitter.
   `dance_balance.rs` models torso momentum, a corrective step, a supported fall,
   and standing back up. Rare overcommitted impulses require energetic, regular
@@ -129,8 +140,12 @@ The prototype separates audio features, choreography, the body rig, and drawing:
   blend across overlapping body volumes, and pushout uses the same clearance as
   the acceptance check, preventing chatter while hands slide past the hips.
   The knee poles face forward in the pelvis frame. A planted ankle retains its
-  world position during turns; depth changes happen during a swing or deliberate
-  floor drag. Pelvis height
+  world position and foot orientation during turns. Depth and orientation change
+  during a swing or deliberate floor drag. On a step turn the head looks ahead of
+  the shoulders. Wrist flex follows arm motion, and the ponytail follows head motion
+  with its own damping. Separate lumbar and chest segments preserve their lengths
+  during side bends. Recorded foot pitch rolls around the heel or toe, keeping the
+  active end planted while the other end lifts. Pelvis height
   respects both spatial leg reaches. Orthographic projection keeps the stage
   stable and gives the existing Braille renderer screen coordinates.
   Playback changes preserve these springs and the skeleton; pause freezes them.
@@ -154,10 +169,27 @@ The prototype separates audio features, choreography, the body rig, and drawing:
 
 Onset-based tempo and automatic profile selection are approximate. Loud sustained
 music can still use Flow; a fast onset rate alone does not justify jumping.
-There is no genre classifier, motion-capture dataset, or learned model in the
-runtime. This is a constrained procedural improvisation, built from reusable
-movement primitives. It varies their combinations rather than guaranteeing that
-every pose is unique.
+The runtime uses procedural motifs and two compact retargeted excerpts.
+
+### Recorded phrases
+
+The excerpts come from the Carnegie Mellon University Graphics Lab Motion Capture
+Database. Its FAQ permits copying, modifying, and redistributing the data.
+[CMU subject 05](http://mocap.cs.cmu.edu/search.php?subjectnumber=5) ·
+[CMU data reuse terms](http://mocap.cs.cmu.edu/faqs.php)
+
+| Embedded phrase | Source | Capture frames (zero-based, inclusive) |
+| --- | --- | --- |
+| `soft.bin` | `05_12.amc` | 1015–1352 |
+| `turn.bin` | `05_03.amc` | 0–420 |
+
+To reproduce the embedded files, download `05.asf` and the two AMC recordings
+from the subject page, then run `python3 scripts/retarget-dance-clips.py SOURCE_DIR`
+with NumPy installed. The conversion projects stage travel into the available
+terminal space, scales limb targets to the Plavno rig, and annotates the landing
+windows. Each asset stores 97 samples of pelvis translation, facing, torso and
+head angles, wrist targets, and foot pitch, followed by its contact windows.
+The two files total 6,299 bytes. Playback uses the embedded data offline.
 
 ## Track transitions and animation state
 

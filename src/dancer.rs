@@ -75,7 +75,7 @@ impl Dancer {
         self.motion.set_space(columns);
         let paused = engine.paused && !engine.is_scrubbing();
         let playing = engine.track().is_some() && !paused && !engine.buffering();
-        self.tick(engine.levels(), dt, playing, paused);
+        self.tick(engine.source_levels(), dt, playing, paused);
     }
 
     fn sync_playback(&mut self, playback: (u64, u64), speed: f32) {

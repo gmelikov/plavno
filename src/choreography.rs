@@ -1,4 +1,4 @@
-use crate::dance_motion::Features;
+use crate::{dance_clips::Clip, dance_motion::Features};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Move {
@@ -6,6 +6,8 @@ pub enum Move {
     Reach,
     Sweep,
     Travel,
+    StepTurn,
+    Captured(Clip),
     Crouch,
     Hop,
     Jack,
@@ -14,6 +16,12 @@ pub enum Move {
     Rock,
     Punch,
     Hakken,
+}
+
+impl Move {
+    pub fn follows_counts(self) -> bool {
+        matches!(self, Self::StepTurn | Self::Captured(_))
+    }
 }
 
 pub struct Phrase {
@@ -27,6 +35,50 @@ pub struct Phrase {
     pub reach: f32,
     pub pace: f32,
     pub performed: bool,
+}
+
+impl Phrase {
+    pub fn step_turn(&self) -> Option<StepTurn> {
+        (self.movement == Move::StepTurn).then(|| StepTurn {
+            count: self.progress * 8.0,
+            direction: if self.destination < self.start {
+                -1.0
+            } else {
+                1.0
+            },
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct StepTurn {
+    pub count: f32,
+    pub direction: f32,
+}
+
+impl StepTurn {
+    pub fn lead(self) -> usize {
+        usize::from(self.direction > 0.0)
+    }
+
+    pub fn step(self) -> Option<(usize, f32)> {
+        // Counts are zero-based. Step out on two and travel again on five and six.
+        match self.count as u8 {
+            1 => Some((self.lead(), 0.48)),
+            4 => Some((1 - self.lead(), 0.78)),
+            5 => Some((self.lead(), 1.0)),
+            _ => None,
+        }
+    }
+
+    pub fn accent(self, start: f32, peak: f32, release: f32, end: f32) -> f32 {
+        ease(((self.count - start) / (peak - start)).clamp(0.0, 1.0))
+            * (1.0 - ease(((self.count - release) / (end - release)).clamp(0.0, 1.0)))
+    }
+
+    pub fn reach(self) -> f32 {
+        self.accent(1.55, 2.55, 3.25, 4.45)
+    }
 }
 
 pub struct Choreography {
@@ -77,11 +129,23 @@ impl Choreography {
         limit: f32,
         planted: bool,
         dt: f32,
-    ) {
+    ) -> bool {
         self.since_hop += dt;
+        if self.phrase.movement.follows_counts()
+            && !self.phrase.performed
+            && self.phrase.progress < 0.1
+            && planted
+            && music.hit
+            && music.confidence >= 0.55
+        {
+            // Align the preparation once, before committing to a foot contact.
+            self.phrase.progress = 0.0;
+            self.phrase.performed = true;
+            return true;
+        }
         self.phrase.progress = (self.phrase.progress + dt / self.phrase.duration).min(1.0);
         if self.phrase.progress < 1.0 || !planted || music.energy < 0.08 {
-            return;
+            return false;
         }
         let rhythm = weights[1] + weights[2];
         let club = rhythm > 0.5 && music.energy > 0.6;
@@ -93,6 +157,13 @@ impl Choreography {
         ];
         if limit > 0.2 {
             choices.push((Move::Travel, 2.5));
+            if weights[1] > 0.4 && music.energy > 0.35 && (0.3..=0.85).contains(&music.period) {
+                choices.push((Move::StepTurn, 2.5 + weights[1] * 3.0 + house));
+                if music.confidence >= 0.55 && (0.4..=0.75).contains(&music.period) {
+                    choices.push((Move::Captured(Clip::Soft), 3.0 + (1.0 - music.energy) * 3.0));
+                    choices.push((Move::Captured(Clip::Turn), 1.0 + music.energy * 4.0));
+                }
+            }
         }
         if club {
             choices.push((Move::Jack, 2.2 + house * 4.0));
@@ -144,6 +215,8 @@ impl Choreography {
         }
         if movement == Move::Travel {
             duration = duration.max(music.period.max(0.3) * 8.0 * rhythm);
+        } else if movement.follows_counts() {
+            duration = music.period * 8.0;
         }
         let mut direction = if self.random() < 0.55 {
             -self.last_direction
@@ -157,8 +230,16 @@ impl Choreography {
             direction = 1.0;
         }
         let distance = (0.7 + self.random() * 0.8) * (0.6 + music.energy * 0.4);
-        let destination = if movement == Move::Travel {
+        let distance = match movement {
+            Move::Travel => distance,
+            Move::StepTurn => 0.25 + music.energy * 0.13,
+            Move::Captured(clip) => clip.travel(),
+            _ => 0.0,
+        };
+        if distance > 0.0 {
             self.last_direction = direction;
+        }
+        let destination = if distance > 0.0 {
             (center + direction * distance).clamp(-limit, limit)
         } else {
             center
@@ -180,8 +261,9 @@ impl Choreography {
             hand_delay: 0.8 + self.random() * 2.0,
             reach: 0.8 + self.random() * 0.35,
             pace: 0.75 + self.random() * 0.5 + weights[2] * music.energy * 0.35,
-            performed: false,
+            performed: movement.follows_counts() && music.hit,
         };
+        true
     }
 
     pub fn center(&self, lookahead: f32) -> f32 {

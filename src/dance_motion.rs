@@ -1,6 +1,7 @@
 use crate::{
     choreography::{Choreography, Move, ease},
     dance_balance::Balance,
+    dance_clips::Sample,
 };
 use std::{
     collections::hash_map::RandomState,
@@ -318,6 +319,7 @@ impl Footwork {
     fn choose(movement: Move, energy: f32, variation: f32) -> Self {
         match movement {
             Move::Shuffle | Move::Stomp | Move::Hakken => Self::Lift,
+            Move::StepTurn => Self::Skim,
             Move::Crouch | Move::Hop => Self::Grounded,
             Move::Travel => match variation {
                 v if v < 0.5 => Self::Slide,
@@ -350,9 +352,24 @@ struct Swing {
     stomp: bool,
     footwork: Footwork,
     excursion: f32,
+    capture: Option<CapturedSwing>,
+}
+
+struct CapturedSwing {
+    progress: f32,
+    duration: f32,
+    depth: f32,
+    yaw: f32,
 }
 
 impl Swing {
+    fn progress(&self, step_phase: f32) -> f32 {
+        self.capture.as_ref().map_or_else(
+            || ((step_phase - 0.12) / 0.6).clamp(0.0, 1.0),
+            |capture| capture.progress.min(1.0),
+        )
+    }
+
     fn path_progress(&self, progress: f32) -> f32 {
         if self.footwork == Footwork::Slide {
             // Unload before dragging, then settle before returning the weight.
@@ -520,7 +537,7 @@ impl Motion {
             pose: Pose::default(),
             spatial: crate::dance_space::Rig::default(),
         };
-        motion.pose = motion.make_pose(Features::default());
+        motion.pose = motion.make_pose(Features::default(), None);
         let torso = motion.torso_angle();
         for (index, hand) in motion.hands.iter_mut().enumerate() {
             let side = if index == 0 { -1.0 } else { 1.0 };
@@ -585,9 +602,14 @@ impl Motion {
             other => other,
         };
         let following = self.transition == Transition::Following;
+        let previous_move = self.choreography.phrase.movement;
+        let previous_progress = self.choreography.phrase.progress;
         if music.hit && following && rhythm > 0.25 {
-            let strength =
-                (music.energy * 0.55 + music.bass * 0.45) * (0.6 + music.accent * 0.4) * rhythm;
+            let recorded = matches!(previous_move, Move::Captured(_));
+            let strength = (music.energy * 0.55 + music.bass * 0.45)
+                * (0.6 + music.accent * 0.4)
+                * rhythm
+                * if recorded { 0.35 } else { 1.0 };
             self.bounce.velocity += strength * (0.7 + pulse * 0.9);
             match self.choreography.phrase.movement {
                 Move::Jack => self.jack.velocity += strength * 3.5,
@@ -598,8 +620,11 @@ impl Motion {
             if self.choreography.random() < 0.65 {
                 self.impulse_direction = -self.impulse_direction;
             }
-            let vigorous =
-                music.energy > 0.8 && music.bass > 0.55 && music.confidence > 0.6 && pulse > 0.35;
+            let vigorous = !recorded
+                && music.energy > 0.8
+                && music.bass > 0.55
+                && music.confidence > 0.6
+                && pulse > 0.35;
             let impulse =
                 if vigorous && planted && variation < 0.012 && self.balance.can_overbalance() {
                     9.0 + variation * 80.0
@@ -620,7 +645,7 @@ impl Motion {
                 .bridge((self.feet[0].x + self.feet[1].x) / 2.0);
         }
         self.choreography.repertoire = self.repertoire;
-        self.choreography.advance(
+        let started_phrase = self.choreography.advance(
             music,
             self.weights,
             (self.feet[0].x + self.feet[1].x) / 2.0,
@@ -628,6 +653,53 @@ impl Motion {
             planted && following && !self.balance.recovering(),
             dt,
         );
+        let phrase = &mut self.choreography.phrase;
+        let movement = phrase.movement;
+        let capture = if let Move::Captured(clip) = movement {
+            let mut distance = phrase.destination - phrase.start;
+            let offset = self.root.position - phrase.start;
+            if previous_move != movement && offset.abs() > 0.025 {
+                let loaded = usize::from(offset > 0.0);
+                let mirrored = phrase.start - distance;
+                if clip.first_foot(distance.signum()) == loaded && mirrored.abs() <= self.space {
+                    phrase.destination = mirrored;
+                    distance = -distance;
+                }
+            }
+            Some((
+                clip,
+                distance.signum(),
+                (distance.abs() / clip.travel()).min(1.0),
+            ))
+        } else {
+            None
+        };
+        let captured = capture.map(|(clip, direction, scale)| {
+            let mut sample = clip.sample(phrase.progress, direction);
+            sample.root[0] *= scale;
+            sample
+        });
+        let recorded_step = capture.and_then(|(clip, direction, scale)| {
+            let previous = if started_phrase {
+                0.0
+            } else {
+                previous_progress
+            };
+            clip.step_between(previous, phrase.progress, direction)
+                .map(|mut step| {
+                    step.x *= scale;
+                    step
+                })
+        });
+        let phrase_progress = phrase.progress;
+        let phrase_duration = phrase.duration;
+        let phrase_start = phrase.start;
+        let turn = self.choreography.phrase.step_turn();
+        if started_phrase && movement.follows_counts() {
+            self.step_phase = 0.0;
+            self.step_planned = false;
+            self.footwork = Footwork::Grounded;
+        }
         // Sustained gestures use a free phrase clock; rhythmic phrases span eight beats.
         self.phrase = (self.phrase
             + dt * TAU
@@ -642,17 +714,35 @@ impl Motion {
             dt,
         );
         // Fast music changes stride and lift; contacts cannot be compressed without limit.
-        let step_period = self.cadence.position.max(0.3);
+        let step_period = if movement.follows_counts() {
+            self.choreography.phrase.duration / 8.0
+        } else {
+            self.cadence.position.max(0.3)
+        };
+        let captured_landed = self
+            .swing
+            .as_mut()
+            .and_then(|swing| swing.capture.as_mut())
+            .is_some_and(|step| {
+                step.progress += dt / step.duration;
+                step.progress >= 1.0
+            });
         self.step_phase += dt / step_period;
+        if (captured_landed
+            || self.step_phase >= 1.0
+                && self
+                    .swing
+                    .as_ref()
+                    .is_some_and(|swing| swing.capture.is_none()))
+            && let Some(swing) = self.swing.take()
+        {
+            self.feet[swing.foot] = swing.target;
+        }
         if self.step_phase >= 1.0 {
-            if let Some(swing) = self.swing.take() {
-                self.feet[swing.foot] = swing.target;
-            }
             self.step_phase %= 1.0;
             self.step_index = (self.step_index + 1) % 2;
             self.step_planned = false;
         }
-        let movement = self.choreography.phrase.movement;
         if movement == Move::Hop
             && following
             && !self.choreography.phrase.performed
@@ -699,9 +789,34 @@ impl Motion {
                 stomp: false,
                 footwork: Footwork::Lift,
                 excursion: 0.0,
+                capture: None,
             });
             self.balance.step_started();
         }
+        if let Some(step) = recorded_step
+            && following
+            && self.swing.is_none()
+            && !self.balance.recovering()
+        {
+            let target = self.foot_target(step.side, phrase_start + step.x);
+            self.footwork = Footwork::Lift;
+            self.swing = Some(Swing {
+                foot: step.side,
+                start: self.feet[step.side],
+                target: Point::new(target, 0.97),
+                lift: step.lift,
+                stomp: false,
+                footwork: Footwork::Lift,
+                excursion: 0.0,
+                capture: Some(CapturedSwing {
+                    progress: (phrase_progress - step.start) / (step.end - step.start),
+                    duration: (step.end - step.start) * phrase_duration,
+                    depth: step.depth.clamp(-0.14, 0.14),
+                    yaw: step.yaw,
+                }),
+            });
+        }
+        let turn_step = turn.and_then(|turn| turn.step());
         if self.swing.is_none()
             && following
             && !self.balance.recovering()
@@ -712,6 +827,8 @@ impl Motion {
             && (rhythm > 0.25 || movement == Move::Travel)
             && music.energy > 0.08
             && !self.step_planned
+            && capture.is_none()
+            && (turn.is_none() || turn_step.is_some())
         {
             self.step_planned = true;
             self.footwork = Footwork::choose(movement, music.energy, self.choreography.random());
@@ -722,9 +839,22 @@ impl Motion {
                     );
                     self.choreography.phrase.performed = true;
                 }
-                let foot = self.step_index as usize % 2;
+                let (foot, travel) = turn_step.map_or_else(
+                    || {
+                        (
+                            self.step_index as usize % 2,
+                            self.choreography.center(step_period * 0.6),
+                        )
+                    },
+                    |(foot, position)| {
+                        let phrase = &self.choreography.phrase;
+                        (
+                            foot,
+                            phrase.start + (phrase.destination - phrase.start) * position,
+                        )
+                    },
+                );
                 let side = if foot == 0 { -1.0 } else { 1.0 };
-                let travel = self.choreography.center(step_period * 0.6);
                 let spread = match movement {
                     Move::Shuffle => 0.11,
                     Move::Stomp => 0.09,
@@ -766,22 +896,32 @@ impl Motion {
                     } else {
                         0.0
                     },
+                    capture: None,
                 });
             }
         }
         let mut support = (self.feet[0].x + self.feet[1].x) / 2.0;
         if let Some(swing) = &self.swing {
-            let progress = ((self.step_phase - 0.12) / 0.6).clamp(0.0, 1.0);
+            let progress = swing.progress(self.step_phase);
             let arc = swing.arc(progress);
             self.feet[swing.foot] = swing.position(progress);
             let center = (self.feet[0].x + self.feet[1].x) / 2.0;
             let travel = (swing.target.x - swing.start.x).abs();
             let transfer = 0.85 * (1.0 - (travel / 0.2).min(1.0));
             support = center + (self.feet[1 - swing.foot].x - center) * arc * transfer;
+        } else if let Some(turn) = turn {
+            let weight = turn.accent(1.66, 2.38, 3.2, 4.1) * 0.65;
+            support += (self.feet[turn.lead()].x - support) * weight;
         } else if following && self.footwork == Footwork::Grounded && self.jump.is_none() {
             let transfer = ((self.step_phase + self.step_index as f32) * PI).sin();
             let width = (self.feet[1].x - self.feet[0].x).abs();
             support += transfer * width.min(0.13) * 0.3 * rhythm * music.energy;
+        }
+        if let Some(sample) = &captured {
+            let [a, b] = self.feet.map(|foot| foot.x);
+            let target = (phrase_start + sample.root[0]).clamp(a.min(b), a.max(b));
+            let weight = if self.swing.is_some() { 0.35 } else { 0.9 };
+            support += (target - support) * weight * sample.blend;
         }
         let sway = (self.phrase * 2.0).sin() * (0.045 * flow + 0.012 * rhythm) * music.energy;
         let velocity = self.root.velocity;
@@ -794,7 +934,11 @@ impl Motion {
         }
         let acceleration = (self.root.velocity - velocity) / dt;
         let envelope = self.choreography.envelope();
-        let dip = if movement == Move::Crouch {
+        let dip = if let Some(sample) = &captured {
+            sample.root[1].min(0.1) * sample.blend
+        } else if let Some(turn) = turn {
+            0.038 * music.energy * turn.accent(0.0, 0.73, 0.94, 1.8)
+        } else if movement == Move::Crouch {
             (0.09 + music.bass * 0.05) * envelope
         } else {
             0.0
@@ -849,7 +993,7 @@ impl Motion {
             12.0,
             dt,
         );
-        let mut pose = self.make_pose(music);
+        let mut pose = self.make_pose(music, captured.as_ref());
         let torso = self.torso_angle();
         for (index, hand) in self.hands.iter_mut().enumerate() {
             let side = if index == 0 { -1.0 } else { 1.0 };
@@ -876,6 +1020,7 @@ impl Motion {
             }
         }
         self.pose = pose;
+        let captured = captured.unwrap_or_default();
         self.spatial.advance(
             &pose,
             crate::dance_space::Cue {
@@ -893,10 +1038,27 @@ impl Motion {
                 swing: self.swing.as_ref().map(|swing| {
                     (
                         swing.foot,
-                        swing.path_progress(((self.step_phase - 0.12) / 0.6).clamp(0.0, 1.0)),
+                        swing.path_progress(swing.progress(self.step_phase)),
                     )
                 }),
                 sliding: self.sliding_foot().is_some(),
+                turn: turn.map_or(0.0, |turn| {
+                    turn.direction * 1.45 * turn.accent(3.8, 5.65, 6.35, 8.0)
+                }) + captured.yaw * captured.blend,
+                look: turn.map_or(0.0, |turn| {
+                    turn.direction
+                        * (0.24 * turn.reach() + 0.43 * turn.accent(3.2, 4.15, 4.55, 5.65))
+                }) + captured.look * captured.blend,
+                lumbar: captured.lumbar * captured.blend,
+                twist: captured.twist * captured.blend,
+                pitch: captured.pitch * captured.blend,
+                depth: captured.root[2] * captured.blend,
+                foot_roll: captured.foot_roll.map(|roll| roll * captured.blend),
+                foot_target: self
+                    .swing
+                    .as_ref()
+                    .and_then(|swing| swing.capture.as_ref())
+                    .map(|step| (step.depth, step.yaw)),
             },
             dt,
         );
@@ -921,7 +1083,7 @@ impl Motion {
             + (self.jack.position + self.chest.position) * (1.0 - self.balance.brace())
     }
 
-    fn make_pose(&self, music: Features) -> Pose {
+    fn make_pose(&self, music: Features, captured: Option<&Sample>) -> Pose {
         let [flow, groove, pulse] = self.weights;
         let rhythm = groove + pulse;
         let bounce = self.bounce.position
@@ -1000,6 +1162,31 @@ impl Motion {
                     hand.x *= 0.8;
                     hand.y += 0.045 * envelope;
                 }
+                Move::StepTurn => {
+                    let turn = phrase.step_turn().unwrap();
+                    let leading = index == turn.lead();
+                    let gather = turn.accent(0.2, 1.05, 1.4, 2.55);
+                    hand = hand.lerp(Point::new(0.045, 0.085), gather);
+                    let reach = if leading {
+                        Point::new(0.27, -0.20)
+                    } else {
+                        Point::new(0.07, 0.09)
+                    };
+                    hand = hand.lerp(reach, turn.reach());
+                    let close = turn.accent(4.12, 5.35, 6.15, 7.7);
+                    hand = hand.lerp(Point::new(0.055, if leading { 0.05 } else { 0.13 }), close);
+                    depth = depth.lerp(
+                        Point::new(0.25, if leading { 0.15 } else { 0.7 }),
+                        turn.reach(),
+                    );
+                }
+                Move::Captured(_) => {
+                    if let Some(pose) = captured {
+                        let [x, y, z] = pose.wrists[index];
+                        hand = hand.lerp(Point::new(side * x, y), pose.blend);
+                        depth = depth.lerp(Point::new(z, z), pose.blend);
+                    }
+                }
                 Move::Crouch => hand.y += 0.08 * envelope,
                 Move::Hop => hand.y -= altitude * 0.6,
                 Move::Jack | Move::Shuffle | Move::Stomp | Move::Hakken | Move::Punch => {
@@ -1008,9 +1195,12 @@ impl Motion {
                         Move::Punch => &PUNCH,
                         _ => &PUMP,
                     };
-                    let pump_phase = (self.step_phase + self.step_index as f32) * 4.0
-                        + if index == 0 { 0.0 } else { 4.0 };
-                    let pump = gesture(keys, pump_phase);
+                    let step = self.step_phase + self.step_index as f32;
+                    let pump_phase = step * 4.0 + if index == 0 { 0.0 } else { 3.45 };
+                    let mut pump = gesture(keys, pump_phase);
+                    let lead = (step * PI).cos() * side;
+                    pump.x *= 0.9 + 0.16 * lead;
+                    pump.y += (1.0 - lead) * 0.028;
                     hand = hand.lerp(pump, envelope);
                     let pump_depth = if phrase.movement == Move::Punch {
                         Point::new(0.5, 0.85)
@@ -1211,6 +1401,138 @@ fn gesture(keys: &[Point; 8], phase: f32) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_groove_keeps_support_while_mirroring_and_retiming_the_steps() {
+        use crate::dance_clips::Clip;
+        for (clip, expected_steps) in [(Clip::Soft, 2), (Clip::Turn, 5)] {
+            for period in [0.4, 0.5, 0.72] {
+                for direction in [-1.0, 1.0] {
+                    let mut motion = Motion::with_seed(Style::Groove, 42);
+                    let phrase = &mut motion.choreography.phrase;
+                    let movement = Move::Captured(clip);
+                    phrase.movement = movement;
+                    phrase.destination = clip.travel() * direction;
+                    phrase.duration = period * 8.0;
+                    let mut steps = 0;
+                    let mut last_swing = None;
+                    let mut wrist_height = 0.0_f32;
+                    let mut torso_turn = 0.0_f32;
+                    let dt = 1.0 / 30.0;
+                    for _ in 0..(period * 8.2 / dt) as usize {
+                        let before = motion.spatial.pose;
+                        motion.advance(
+                            Features {
+                                energy: 0.88,
+                                period,
+                                ..Features::default()
+                            },
+                            dt,
+                        );
+                        if motion.choreography.phrase.movement != movement {
+                            break;
+                        }
+                        let pose = motion.spatial.pose;
+                        let swing = motion.swing.as_ref().map(|swing| swing.foot);
+                        steps += usize::from(swing.is_some() && swing != last_swing);
+                        for foot in 0..2 {
+                            if swing != Some(foot) && last_swing != Some(foot) {
+                                let heel_shift = pose.heels[foot].sub(before.heels[foot]).length();
+                                let toe_shift = pose.toes[foot].sub(before.toes[foot]).length();
+                                assert!(
+                                    heel_shift.min(toe_shift) < 0.003,
+                                    "support moves on {clip:?}"
+                                );
+                            }
+                            assert!(
+                                (pose.knees[foot].sub(pose.ankles[foot]).length() - 0.23).abs()
+                                    < 0.002
+                            );
+                        }
+                        last_swing = swing;
+                        let chest = pose.shoulders[0].lerp(pose.shoulders[1], 0.5);
+                        wrist_height =
+                            wrist_height.max(chest.y - pose.wrists[0].y.min(pose.wrists[1].y));
+                        torso_turn = torso_turn.max((pose.hip_yaw * -direction).max(0.0));
+                        assert!(!motion.balance.recovering(), "{clip:?} at {period}");
+                    }
+                    assert_eq!(
+                        steps, expected_steps,
+                        "{clip:?} at {period}, direction {direction}"
+                    );
+                    match clip {
+                        Clip::Soft => {
+                            assert!(wrist_height > 0.075, "captured reach {wrist_height}")
+                        }
+                        Clip::Turn => assert!(torso_turn > 0.85, "captured turn {torso_turn}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn step_turn_transfers_weight_reaches_then_turns_with_three_light_steps() {
+        for period in [0.4, 0.5, 2.0 / 3.0] {
+            for direction in [-1.0, 1.0] {
+                let mut motion = Motion::with_seed(Style::Groove, 42);
+                let phrase = &mut motion.choreography.phrase;
+                phrase.movement = Move::StepTurn;
+                phrase.destination = 0.36 * direction;
+                phrase.duration = period * 8.0;
+                let lead = usize::from(direction > 0.0);
+                let mut steps = Vec::new();
+                let mut swing_foot = None;
+                let mut turn: f32 = 0.0;
+                let mut look: f32 = 0.0;
+                let mut reach: f32 = 0.0;
+                let mut weight: f32 = 0.0;
+                let dt = 1.0 / 30.0;
+                while motion.choreography.phrase.progress < 7.85 / 8.0 {
+                    let before = motion.spatial.pose;
+                    motion.advance(
+                        Features {
+                            energy: 0.92,
+                            period,
+                            ..Features::default()
+                        },
+                        dt,
+                    );
+                    let moving = motion.swing.as_ref().map(|swing| swing.foot);
+                    let pose = motion.spatial.pose;
+                    if let Some(foot) = moving.filter(|_| moving != swing_foot) {
+                        steps.push(foot);
+                    }
+                    for foot in 0..2 {
+                        if moving != Some(foot) && swing_foot != Some(foot) {
+                            assert_eq!(before.ankles[foot], pose.ankles[foot]);
+                            assert_eq!(before.toes[foot], pose.toes[foot]);
+                        }
+                    }
+                    swing_foot = moving;
+                    assert!(!motion.balance.recovering());
+                    let count = motion.choreography.phrase.progress * 8.0;
+                    if (2.4..3.7).contains(&count) {
+                        reach = reach.max(pose.wrists[1 - lead].y - pose.wrists[lead].y);
+                        let center = (motion.feet[0].x + motion.feet[1].x) * 0.5;
+                        weight = weight.max((motion.root.position - center) * direction);
+                    }
+                    if (3.8..5.0).contains(&count) {
+                        look = look.max(direction * (pose.head_yaw - pose.yaw));
+                    }
+                    turn = turn.max(pose.hip_yaw * direction);
+                }
+                assert_eq!(steps, [lead, 1 - lead, lead], "period {period}");
+                assert!(reach > 0.12, "arm contrast {reach} at period {period}");
+                assert!(
+                    weight > 0.035,
+                    "weight transfer {weight} at period {period}"
+                );
+                assert!(look > 0.12, "gaze lead {look} at period {period}");
+                assert!(turn > 0.9, "turn {turn} at period {period}");
+            }
+        }
+    }
 
     #[test]
     fn auto_repertoire_uses_genre_as_a_prior_and_requires_audible_rhythm() {
@@ -1909,7 +2231,11 @@ mod tests {
                                 && sliding_before != Some(i)
                                 && motion.sliding_foot() != Some(i)
                             {
-                                assert_eq!(spatial_previous.ankles[i], spatial.ankles[i]);
+                                let heel_shift =
+                                    spatial.heels[i].sub(spatial_previous.heels[i]).length();
+                                let toe_shift =
+                                    spatial.toes[i].sub(spatial_previous.toes[i]).length();
+                                assert!(heel_shift.min(toe_shift) < 0.003, "Planted shoe slides");
                             }
                             assert!(
                                 spatial.elbows[i].sub(spatial_previous.elbows[i]).length()
@@ -2092,6 +2418,7 @@ mod tests {
             stomp: false,
             footwork: Footwork::Slide,
             excursion: 0.0,
+            capture: None,
         });
         for _ in 0..300 {
             motion.spatial.advance(
