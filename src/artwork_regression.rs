@@ -39,6 +39,68 @@ unsafe impl GlobalAlloc for Allocator {
 }
 
 #[test]
+fn large_png_cover_is_downsampled_without_a_full_size_buffer() {
+    let mut bytes = Cursor::new(Vec::new());
+    let cover = image::RgbaImage::from_fn(2048, 2048, |x, y| {
+        image::Rgba([if x < 1024 { 20 } else { 200 }, 40, 60, y as u8])
+    });
+    image::DynamicImage::ImageRgba8(cover)
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+
+    LARGEST.set(0);
+    MEASURING.set(true);
+    let thumbnail = decode(bytes.get_ref());
+    MEASURING.set(false);
+
+    let thumbnail = thumbnail.unwrap();
+    assert_eq!(thumbnail.dimensions(), (192, 192));
+    assert_eq!(thumbnail.get_pixel(10, 90).0, [20, 40, 60]);
+    assert_eq!(thumbnail.get_pixel(182, 90).0, [200, 40, 60]);
+    let largest = LARGEST.get();
+    assert!(largest < 1024 * 1024, "Decoder allocated {largest} bytes");
+}
+
+#[test]
+fn interlaced_indexed_png_matches_the_full_image_thumbnail() {
+    let bytes = include_bytes!("../tests/fixtures/cover-adam7.png");
+    let expected = image::load_from_memory(bytes)
+        .unwrap()
+        .thumbnail(192, 192)
+        .into_rgb8();
+
+    let thumbnail = decode(bytes).unwrap();
+    assert_eq!(thumbnail.dimensions(), (192, 128));
+    assert_eq!(thumbnail, expected);
+}
+
+#[test]
+fn large_jpeg_and_webp_covers_scale_into_small_output_buffers() {
+    let image = image::DynamicImage::ImageRgb8(RgbImage::from_fn(1536, 1024, |x, _| {
+        image::Rgb(if x < 768 { [20, 40, 60] } else { [200, 80, 30] })
+    }));
+    for format in [image::ImageFormat::Jpeg, image::ImageFormat::WebP] {
+        let mut bytes = Cursor::new(Vec::new());
+        image.write_to(&mut bytes, format).unwrap();
+
+        LARGEST.set(0);
+        MEASURING.set(true);
+        let thumbnail = decode(bytes.get_ref());
+        MEASURING.set(false);
+
+        let thumbnail = thumbnail.unwrap();
+        assert_eq!(thumbnail.dimensions(), (192, 128), "{format:?}");
+        assert!(thumbnail.get_pixel(10, 60)[0] < 25, "{format:?}");
+        assert!(thumbnail.get_pixel(182, 60)[0] > 195, "{format:?}");
+        let largest = LARGEST.get();
+        assert!(
+            largest < 1024 * 1024,
+            "{format:?} allocated {largest} bytes"
+        );
+    }
+}
+
+#[test]
 fn narrow_covers_keep_render_allocations_bounded_by_the_viewport() {
     for (dimensions, area) in [
         ((1, 2048), Rect::new(0, 0, 200, 20)),

@@ -25,7 +25,10 @@ encoding_rs = "0.8"
 hmac = "0.12"
 html-escape = "0.2"
 image = { version = "=0.25.9", default-features = false, features = ["jpeg", "png", "webp"] }
+jpeg-decoder = { version = "0.3", default-features = false }
 libc = "0.2"
+libwebp-sys = { version = "0.14", default-features = false }
+png = "0.18"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 rodio = { version = "=0.21.1", default-features = false, features = ["playback", "mp3", "flac", "mp4", "vorbis"] }
 rpassword = "7"

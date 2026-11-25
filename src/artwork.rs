@@ -1,4 +1,4 @@
-use image::{ImageReader, RgbImage, imageops::FilterType};
+use image::{ImageFormat, ImageReader, Rgb, RgbImage, imageops::FilterType};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 use std::{
     collections::VecDeque,
@@ -12,6 +12,10 @@ use std::{
 
 type Cover = Arc<RgbImage>;
 type Reply = (String, Option<Cover>);
+
+const COVER_SIZE: u32 = 192;
+const MAX_IMAGE_SIZE: u32 = 2048;
+const MAX_DECODE_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Default)]
 struct Pending {
@@ -202,12 +206,186 @@ fn decode(bytes: &[u8]) -> Option<RgbImage> {
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
+    if reader.format() == Some(ImageFormat::Png) {
+        let mut decoder = png::Decoder::new_with_limits(
+            Cursor::new(bytes),
+            png::Limits {
+                bytes: MAX_DECODE_BYTES,
+            },
+        );
+        decoder.set_ignore_text_chunk(true);
+        decoder.set_ignore_iccp_chunk(true);
+        decoder.set_transformations(png::Transformations::normalize_to_color8());
+        let info = decoder.read_header_info().ok()?;
+        let longest = info.width.max(info.height);
+        if longest > MAX_IMAGE_SIZE {
+            return None;
+        }
+        if longest > COVER_SIZE {
+            return png_thumbnail(decoder.read_info().ok()?);
+        }
+    }
+    let scaled = match reader.format() {
+        Some(ImageFormat::Jpeg) => jpeg_thumbnail(bytes),
+        Some(ImageFormat::WebP) => webp_thumbnail(bytes),
+        _ => None,
+    };
+    if scaled.is_some() {
+        return scaled;
+    }
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(2048);
-    limits.max_image_height = Some(2048);
-    limits.max_alloc = Some(32 * 1024 * 1024);
+    limits.max_image_width = Some(MAX_IMAGE_SIZE);
+    limits.max_image_height = Some(MAX_IMAGE_SIZE);
+    limits.max_alloc = Some(MAX_DECODE_BYTES as u64);
     reader.limits(limits);
-    Some(reader.decode().ok()?.thumbnail(192, 192).to_rgb8())
+    Some(
+        reader
+            .decode()
+            .ok()?
+            .thumbnail(COVER_SIZE, COVER_SIZE)
+            .into_rgb8(),
+    )
+}
+
+fn thumbnail_size(width: u32, height: u32) -> (u32, u32) {
+    let longest = width.max(height);
+    let scaled = |size: u32| ((size * COVER_SIZE + longest / 2) / longest).max(1);
+    (scaled(width), scaled(height))
+}
+
+fn jpeg_thumbnail(bytes: &[u8]) -> Option<RgbImage> {
+    use jpeg_decoder::PixelFormat;
+
+    let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(bytes));
+    decoder.set_max_decoding_buffer_size(MAX_DECODE_BYTES);
+    decoder.read_info().ok()?;
+    let info = decoder.info()?;
+    if !matches!(info.pixel_format, PixelFormat::RGB24 | PixelFormat::L8) {
+        return None;
+    }
+    let (width, height) = (u32::from(info.width), u32::from(info.height));
+    if !(COVER_SIZE + 1..=MAX_IMAGE_SIZE).contains(&width.max(height)) {
+        return None;
+    }
+    let (width, height) = thumbnail_size(width, height);
+    let (scaled_width, scaled_height) = decoder.scale(width as u16, height as u16).ok()?;
+    let (scaled_width, scaled_height) = (u32::from(scaled_width), u32::from(scaled_height));
+    let pixels = decoder.decode().ok()?;
+    let image = match info.pixel_format {
+        PixelFormat::RGB24 => RgbImage::from_raw(scaled_width, scaled_height, pixels)?,
+        PixelFormat::L8 => {
+            let image = image::GrayImage::from_raw(scaled_width, scaled_height, pixels)?;
+            image::DynamicImage::ImageLuma8(image).into_rgb8()
+        }
+        _ => return None,
+    };
+    if (scaled_width, scaled_height) == (width, height) {
+        return Some(image);
+    }
+    Some(image::imageops::thumbnail(&image, width, height))
+}
+
+fn webp_thumbnail(bytes: &[u8]) -> Option<RgbImage> {
+    use libwebp_sys::{
+        VP8StatusCode::VP8_STATUS_OK, WEBP_CSP_MODE::MODE_RGB, WebPDecode, WebPDecoderConfig,
+        WebPFreeDecBuffer, WebPGetFeatures, WebPRGBABuffer,
+    };
+
+    let mut config = WebPDecoderConfig::new().ok()?;
+    // The input slice and the initialized feature structure are valid for this call.
+    if unsafe { WebPGetFeatures(bytes.as_ptr(), bytes.len(), &mut config.input) } != VP8_STATUS_OK
+        || config.input.has_animation != 0
+    {
+        return None;
+    }
+    let (width, height) = (
+        u32::try_from(config.input.width).ok()?,
+        u32::try_from(config.input.height).ok()?,
+    );
+    if !(COVER_SIZE + 1..=MAX_IMAGE_SIZE).contains(&width.max(height)) {
+        return None;
+    }
+    let (width, height) = thumbnail_size(width, height);
+    let stride = width as usize * 3;
+    let mut pixels = vec![0; stride * height as usize];
+    config.options.use_scaling = 1;
+    config.options.scaled_width = width as i32;
+    config.options.scaled_height = height as i32;
+    config.output.colorspace = MODE_RGB;
+    config.output.is_external_memory = 1;
+    config.output.u.RGBA = WebPRGBABuffer {
+        rgba: pixels.as_mut_ptr(),
+        stride: stride as i32,
+        size: pixels.len(),
+    };
+    // libwebp writes RGB rows into the supplied buffer and leaves ownership with Rust.
+    let status = unsafe {
+        let status = WebPDecode(bytes.as_ptr(), bytes.len(), &mut config);
+        WebPFreeDecBuffer(&mut config.output);
+        status
+    };
+    if status != VP8_STATUS_OK {
+        return None;
+    }
+    RgbImage::from_raw(width, height, pixels)
+}
+
+fn png_thumbnail(mut reader: png::Reader<Cursor<&[u8]>>) -> Option<RgbImage> {
+    let (width, height) = reader.info().size();
+    let (thumb_width, thumb_height) = thumbnail_size(width, height);
+    let channels = reader.output_color_type().0.samples();
+    let columns: Vec<_> = (0..width)
+        .map(|x| (x * thumb_width / width) as usize)
+        .collect();
+    let mut sums = vec![[0u32; 3]; (thumb_width * thumb_height) as usize];
+
+    // The decoder yields rows in pass order. Each tuple gives the first
+    // source column and row, followed by their sampling steps.
+    let passes: &[(u32, u32, usize, usize)] = if reader.info().interlaced {
+        &[
+            (0, 0, 8, 8),
+            (4, 0, 8, 8),
+            (0, 4, 4, 8),
+            (2, 0, 4, 4),
+            (0, 2, 2, 4),
+            (1, 0, 2, 2),
+            (0, 1, 1, 2),
+        ]
+    } else {
+        &[(0, 0, 1, 1)]
+    };
+    for &(first_x, first_y, step_x, step_y) in passes {
+        if first_x >= width {
+            continue;
+        }
+        for y in (first_y..height).step_by(step_y) {
+            let row = reader.next_row().ok()??;
+            let offset = (y * thumb_height / height * thumb_width) as usize;
+            let columns = columns[first_x as usize..].iter().step_by(step_x);
+            for (&column, pixel) in columns.zip(row.data().chunks_exact(channels)) {
+                let rgb = if channels < 3 {
+                    [pixel[0]; 3]
+                } else {
+                    [pixel[0], pixel[1], pixel[2]]
+                };
+                for (sum, value) in sums[offset + column].iter_mut().zip(rgb) {
+                    *sum += u32::from(value);
+                }
+            }
+        }
+    }
+    if reader.next_row().ok()?.is_some() {
+        return None;
+    }
+
+    let span = |index: u32, source: u32, target: u32| {
+        ((index + 1) * source).div_ceil(target) - (index * source).div_ceil(target)
+    };
+    Some(RgbImage::from_fn(thumb_width, thumb_height, |x, y| {
+        let count = span(x, width, thumb_width) * span(y, height, thumb_height);
+        let rgb = sums[(y * thumb_width + x) as usize];
+        Rgb(rgb.map(|sum| ((sum + count / 2) / count) as u8))
+    }))
 }
 
 #[cfg(test)]
