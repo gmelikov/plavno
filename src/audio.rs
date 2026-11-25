@@ -589,6 +589,8 @@ impl Seek for HttpReader {
 
 struct CacheState {
     chunks: Mutex<BTreeMap<u64, Arc<[u8]>>>,
+    // Writers hold the chunks lock while updating the total.
+    buffered_bytes: AtomicU64,
     reader: Mutex<CacheInputReader>,
     cancelled: AtomicBool,
     started: AtomicBool,
@@ -617,6 +619,26 @@ impl CacheState {
             let progress = stream.progress.lock().unwrap();
             progress.done.then_some(progress.len)
         })
+    }
+
+    fn store_chunk(&self, offset: u64, bytes: Vec<u8>) -> io::Result<Arc<[u8]>> {
+        let mut chunks = self.chunks.lock().unwrap();
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Loading cancelled",
+            ));
+        }
+        let chunk: Arc<[u8]> = bytes.into();
+        let replaced = chunks
+            .insert(offset, chunk.clone())
+            .map_or(0, |old| old.len());
+        let buffered = self.buffered_bytes.load(Ordering::Relaxed);
+        self.buffered_bytes.store(
+            buffered - replaced as u64 + chunk.len() as u64,
+            Ordering::Relaxed,
+        );
+        Ok(chunk)
     }
 }
 
@@ -660,15 +682,8 @@ impl CachedAudio {
         })
     }
 
-    #[cfg(test)]
     pub fn buffered_bytes(&self) -> u64 {
-        self.state
-            .chunks
-            .lock()
-            .unwrap()
-            .values()
-            .map(|chunk| chunk.len() as u64)
-            .sum()
+        self.state.buffered_bytes.load(Ordering::Relaxed)
     }
 
     pub fn cancel(&self) {
@@ -682,7 +697,9 @@ impl CachedAudio {
             stream.changed.notify_all();
         }
         // A request already in flight may finish, but cannot repopulate the cache.
-        self.state.chunks.lock().unwrap().clear();
+        let mut chunks = self.state.chunks.lock().unwrap();
+        chunks.clear();
+        self.state.buffered_bytes.store(0, Ordering::Relaxed);
     }
 
     pub fn start_download(&self) -> Result<()> {
@@ -809,16 +826,7 @@ fn cache_chunk(
     let count = (next - offset).min(limit as u64) as usize;
     let mut bytes = vec![0; count];
     reader.chunk(offset, &mut bytes)?;
-    let mut chunks = state.chunks.lock().unwrap();
-    if state.cancelled.load(Ordering::Relaxed) {
-        return Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            "Loading cancelled",
-        ));
-    }
-    let chunk: Arc<[u8]> = bytes.into();
-    chunks.insert(offset, chunk.clone());
-    Ok((offset, chunk))
+    Ok((offset, state.store_chunk(offset, bytes)?))
 }
 
 struct CacheReader {
@@ -892,6 +900,7 @@ pub fn cache_input(input: Input) -> Result<Arc<CachedAudio>> {
         let audio = Arc::new(CachedAudio {
             state: Arc::new(CacheState {
                 chunks: Mutex::new(BTreeMap::new()),
+                buffered_bytes: AtomicU64::new(0),
                 reader: Mutex::new(CacheInputReader::Pipe),
                 cancelled: AtomicBool::new(false),
                 started: AtomicBool::new(true),
@@ -921,10 +930,9 @@ pub fn cache_input(input: Input) -> Result<Arc<CachedAudio>> {
                         Ok(count) => {
                             bytes.truncate(count);
                             let mut progress = stream.progress.lock().unwrap();
-                            if state.cancelled.load(Ordering::Relaxed) {
+                            if state.store_chunk(offset, bytes).is_err() {
                                 break;
                             }
-                            state.chunks.lock().unwrap().insert(offset, bytes.into());
                             offset += count as u64;
                             progress.len = offset;
                             stream.changed.notify_all();
@@ -1033,6 +1041,7 @@ pub fn cache_input(input: Input) -> Result<Arc<CachedAudio>> {
         }
         Input::Pipe { .. } => unreachable!(),
     };
+    let buffered_bytes = first.as_ref().map_or(0, |bytes| bytes.len() as u64);
     let mut chunks = BTreeMap::new();
     if let Some(first) = first {
         chunks.insert(0, first.into());
@@ -1040,6 +1049,7 @@ pub fn cache_input(input: Input) -> Result<Arc<CachedAudio>> {
     Ok(Arc::new(CachedAudio {
         state: Arc::new(CacheState {
             chunks: Mutex::new(chunks),
+            buffered_bytes: AtomicU64::new(buffered_bytes),
             reader: Mutex::new(reader),
             len,
             cancelled: AtomicBool::new(false),
@@ -1701,6 +1711,7 @@ mod tests {
         let mut bytes = vec![];
         reader.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, std::fs::read(&fixture).unwrap());
+        assert_eq!(buffer.buffered_bytes(), bytes.len() as u64);
         let mut seek = super::prepare_at(buffer.clone(), cancel(), 30.0).unwrap();
         assert!(seek.source.next().is_some());
         std::fs::remove_file(&gate).unwrap();

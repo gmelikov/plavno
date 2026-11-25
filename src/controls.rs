@@ -522,8 +522,7 @@ impl Controls {
         area: Rect,
         volume: &str,
         speed: &str,
-        queue: &str,
-    ) {
+    ) -> Rect {
         let style = Style::default().fg(Color::Gray);
         let mut x = area.x;
         for (index, (text, minus, plus)) in [(volume, '-', '+'), (speed, '[', ']')]
@@ -544,7 +543,7 @@ impl Controls {
                     Line::from(text).style(style),
                     Rect::new(x, area.y, remaining, 1),
                 );
-                return;
+                return Rect::default();
             }
             let width = text.width().min(usize::from(remaining - 6)) as u16;
             if index > 0 {
@@ -572,11 +571,7 @@ impl Controls {
             }
             x += width + 6;
         }
-        let width = area.right().saturating_sub(x);
-        frame.render_widget(
-            Line::from(queue).style(style),
-            Rect::new(x, area.y, width, 1),
-        );
+        Rect::new(x, area.y, area.right().saturating_sub(x), 1)
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, engine: &Engine, visual: Option<Mode>) {

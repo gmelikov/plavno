@@ -731,7 +731,10 @@ fn tui_wave_toggle_restores_visualization_after_no_wave_startup() {
     master.write_all(b" ").unwrap();
     read_until(&mut master, &mut output, |bytes| {
         let screen = screen_text(bytes);
-        screen.contains("Local FLAC") && screen.contains("Paused") && pane_height(&screen).is_some()
+        screen.contains("Local FLAC")
+            && screen.contains("Paused")
+            && screen.contains("760K")
+            && pane_height(&screen).is_some()
     });
     let screen = screen_text(&output);
     assert!(!has_wave(&screen));
@@ -776,11 +779,46 @@ fn tui_wave_toggle_restores_visualization_after_no_wave_startup() {
     assert!(line.contains("Paused"));
     assert!(line.trim_end().ends_with("Wave visualization disabled │"));
     let line = screen.lines().nth(notice + 1).unwrap();
-    assert!(line.contains("Local FLAC"));
+    assert!(line.contains("Local FLAC · 44100 Hz"));
     assert!(line.contains("Volume: 100% +"));
-    assert!(line.trim_end().ends_with("Speed: 1.00x ]  · Queued: 0 │"));
+    assert!(line.trim_end().ends_with("Speed: 1.00x ] Cache:  760K │"));
     assert!(fixture.child.try_wait().unwrap().is_none());
     assert!(!screen_text(&output).contains("Starting"));
+}
+
+#[test]
+fn tui_cache_digits_do_not_move_the_volume_or_speed_controls() {
+    let (small, mut master) = spawn_player(&["--no-wave"]);
+    let mut small_output = Vec::new();
+    read_until(&mut master, &mut small_output, |bytes| {
+        screen_text(bytes).contains("760K")
+    });
+
+    let padded = small.root.join("padded.flac");
+    fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tone.flac"),
+        &padded,
+    )
+    .unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&padded)
+        .unwrap()
+        .set_len(1_010_000)
+        .unwrap();
+    let (_large, mut master) = spawn_player(&["--no-wave", "--file", padded.to_str().unwrap()]);
+    let mut large_output = Vec::new();
+    read_until(&mut master, &mut large_output, |bytes| {
+        screen_text(bytes).contains("1.01M")
+    });
+
+    for label in ["Volume:", "Speed:"] {
+        assert_eq!(
+            label_position(&small_output, label).unwrap(),
+            label_position(&large_output, label).unwrap(),
+            "{label} moved when the cache size gained a digit"
+        );
+    }
 }
 
 #[test]
@@ -855,7 +893,7 @@ fn tui_inline_speed_buttons_hotkeys_and_wheel_keep_the_rate_within_bounds() {
     read_until(&mut master, &mut output, |bytes| {
         screen_text(bytes).contains("Speed: 0.95x")
     });
-    click_label(&mut master, &mut output, "]  · Queued");
+    click_label(&mut master, &mut output, "] Cache:");
     read_until(&mut master, &mut output, |bytes| {
         screen_text(bytes).contains("Speed: 1.00x")
     });

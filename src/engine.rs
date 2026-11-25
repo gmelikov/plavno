@@ -1427,8 +1427,11 @@ impl Engine {
         Ok(false)
     }
 
-    pub fn queue_len(&self) -> usize {
-        self.queue.upcoming.len()
+    pub fn cached_audio_bytes(&self) -> u64 {
+        self.cache
+            .values()
+            .map(|audio| audio.buffered_bytes())
+            .sum()
     }
 
     pub fn is_liked(&self) -> bool {
@@ -2246,6 +2249,15 @@ mod tests {
         assert_eq!(engine.volume, 1.0);
         pump(&mut engine, &events, prefetch_ready);
         assert_eq!(engine.cache.len(), 3);
+        let track_bytes = std::fs::metadata(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/tone.flac"
+        ))
+        .unwrap()
+        .len();
+        pump(&mut engine, &events, |e| {
+            e.cached_audio_bytes() == 3 * track_bytes
+        });
         assert!(engine.cache.contains_key("1"));
         let evicted = engine.cache.get("3").unwrap().clone();
         let stale = engine.prefetch.as_ref().unwrap();
@@ -2257,6 +2269,7 @@ mod tests {
         assert_eq!(engine.track().unwrap().id, "1");
         assert_eq!(engine.cache.len(), 2);
         assert!(!engine.cache.contains_key("3"));
+        assert_eq!(engine.cached_audio_bytes(), 2 * track_bytes);
         assert_eq!(evicted.buffered_bytes(), 0, "Evicted audio remains in RAM");
         for id in ["1", "2"] {
             assert_eq!(

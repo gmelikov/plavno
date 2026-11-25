@@ -220,6 +220,11 @@ pub fn run(
         if artwork_changed {
             scene = None;
         }
+        dirty |= view.is_player()
+            && scene.as_ref().is_some_and(|scene| {
+                scene.cache_size.as_ref()
+                    != Some(&CacheSize::from_bytes(engine.cached_audio_bytes()))
+            });
         let frame_interval = if visual_enabled {
             FRAME_INTERVAL
         } else {
@@ -580,13 +585,62 @@ pub fn run(
 
 struct Scene {
     frame: CachedFrame,
-    state: &'static str,
+    playback: &'static str,
     wave: Rect,
     dance: Rect,
     progress: Rect,
     duration: Option<f64>,
     seconds: Option<u64>,
     progress_label: String,
+    cache_amount: Rect,
+    cache_size: Option<CacheSize>,
+    cache_label: String,
+}
+
+const CACHE_PREFIX: &str = "Cache: ";
+const CACHE_AMOUNT_WIDTH: usize = 5;
+
+#[derive(PartialEq, Eq)]
+enum CacheSize {
+    Rounded {
+        digits: u64,
+        decimals: usize,
+        suffix: char,
+    },
+    Overflow,
+}
+
+impl CacheSize {
+    fn from_bytes(bytes: u64) -> Self {
+        for (suffix, unit) in [('K', 1_000), ('M', 1_000_000), ('G', 1_000_000_000)] {
+            for (decimals, scale) in [(2, 100), (1, 10), (0, 1)] {
+                let step = unit / scale;
+                let digits = bytes.saturating_add(step / 2) / step;
+                if digits < 1_000 {
+                    return Self::Rounded {
+                        digits,
+                        decimals,
+                        suffix,
+                    };
+                }
+            }
+        }
+        Self::Overflow
+    }
+
+    fn label(&self) -> String {
+        match *self {
+            Self::Rounded {
+                digits,
+                decimals,
+                suffix,
+            } => {
+                let value = digits as f64 / 10u64.pow(decimals as u32) as f64;
+                format!("{value:>4.decimals$}{suffix}")
+            }
+            Self::Overflow => ">999G".into(),
+        }
+    }
 }
 
 fn playback_state(engine: &Engine) -> &'static str {
@@ -616,13 +670,13 @@ fn draw(
     selection: &mut TextSelection,
     scene: &mut Option<Scene>,
 ) -> Option<Rect> {
-    let state = playback_state(engine);
+    let playback = playback_state(engine);
     if scene
         .as_ref()
-        .is_none_or(|scene| scene.frame.area() != frame.area() || scene.state != state)
+        .is_none_or(|scene| scene.frame.area() != frame.area() || scene.playback != playback)
     {
         *scene = Some(build_scene(
-            frame, engine, visual, artwork, controls, selection, state,
+            frame, engine, visual, artwork, controls, selection, playback,
         ));
         frame.buffer_mut().reset();
     }
@@ -633,6 +687,21 @@ fn draw(
     }
     controls.highlight_transport(frame.buffer_mut());
     scene.frame.foreground(frame.buffer_mut());
+    let cache_size = CacheSize::from_bytes(engine.cached_audio_bytes());
+    if scene.cache_size.as_ref() != Some(&cache_size) {
+        scene.cache_label = cache_size.label();
+        scene.cache_size = Some(cache_size);
+    }
+    let area = scene.cache_amount;
+    if !area.is_empty() {
+        frame.buffer_mut().set_stringn(
+            area.x,
+            area.y,
+            &scene.cache_label,
+            usize::from(area.width),
+            Style::default().fg(Color::Gray),
+        );
+    }
     let seconds = controls.position(engine.seconds());
     let whole_seconds = seconds.max(0.0) as u64;
     if scene.seconds != Some(whole_seconds) {
@@ -665,7 +734,7 @@ fn build_scene(
     artwork: &mut Artwork,
     controls: &mut Controls,
     selection: &mut TextSelection,
-    state: &'static str,
+    playback: &'static str,
 ) -> Scene {
     controls.sync_track(engine);
     controls.begin_draw();
@@ -675,11 +744,10 @@ fn build_scene(
     let quality = engine.quality().unwrap_or_default();
     let volume = format!("Volume: {:.0}%", engine.volume * 100.0);
     let speed = format!("Speed: {:.2}x", engine.speed);
-    let queue = format!(" · Queued: {}", engine.queue_len());
     let status = if selection.range().is_some() {
-        format!("{state} · Ctrl+C copy · Esc clear")
+        format!("{playback} · Ctrl+C copy · Esc clear")
     } else {
-        state.to_owned()
+        playback.to_owned()
     };
     let favorite = if favorites && engine.can_like() {
         if engine.is_liked() {
@@ -794,8 +862,10 @@ fn build_scene(
         *selection = TextSelection::default();
     }
     let style = Style::default().fg(Color::Gray);
-    let settings_width = (volume.width() + speed.width() + queue.width() + 15)
-        .min(usize::from(content.width)) as u16;
+    let settings_width =
+        (volume.width() + speed.width() + CACHE_PREFIX.len() + CACHE_AMOUNT_WIDTH + 15)
+            .min(usize::from(content.width)) as u16;
+    let mut cache_amount = Rect::default();
     if footer_rows > 0 {
         let status_width = status
             .width()
@@ -806,7 +876,7 @@ fn build_scene(
             Line::from(status).style(accent),
             Rect::new(content.x, row, status_width, 1),
         );
-        controls.draw_settings(
+        let cache_area = controls.draw_settings(
             frame,
             Rect::new(
                 content.right() - settings_width,
@@ -816,7 +886,17 @@ fn build_scene(
             ),
             &volume,
             &speed,
-            &queue,
+        );
+        let prefix_width = cache_area.width.min(CACHE_PREFIX.len() as u16);
+        frame.render_widget(
+            Line::from(CACHE_PREFIX).style(style),
+            Rect::new(cache_area.x, cache_area.y, prefix_width, cache_area.height),
+        );
+        cache_amount = Rect::new(
+            cache_area.x + prefix_width,
+            cache_area.y,
+            cache_area.width - prefix_width,
+            cache_area.height,
         );
     }
     if favorites && footer_rows >= 2 + notice_rows {
@@ -854,13 +934,16 @@ fn build_scene(
     });
     Scene {
         frame: cached,
-        state,
+        playback,
         wave: details,
         dance: dance_area,
         progress: rows[1],
         duration: engine.track().and_then(|track| track.duration),
         seconds: None,
         progress_label: String::new(),
+        cache_amount,
+        cache_size: None,
+        cache_label: String::new(),
     }
 }
 
@@ -915,6 +998,24 @@ fn clock(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_size_uses_five_columns_across_scales_and_rounding_boundaries() {
+        for (bytes, expected) in [
+            (0, "0.00K"),
+            (760_244, " 760K"),
+            (999_499, " 999K"),
+            (999_500, "1.00M"),
+            (1_010_000, "1.01M"),
+            (9_995_000, "10.0M"),
+            (111_000_000, " 111M"),
+            (999_500_000, "1.00G"),
+            (1_010_000_000, "1.01G"),
+            (u64::MAX, ">999G"),
+        ] {
+            assert_eq!(CacheSize::from_bytes(bytes).label(), expected);
+        }
+    }
 
     #[test]
     fn progress_overlays_the_cover_without_erasing_its_background() {
